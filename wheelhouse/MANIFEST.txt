@@ -1,0 +1,38 @@
+# ============================================================================== #
+# AMSA-YOLO OFFLINE WHEELHOUSE MANIFEST                                         #
+# Python Version: 3.12 (cp312) | Target: Linux x86_64                            #
+# ============================================================================== #
+# Total Wheels: 28
+# Excluded Base Stack: torch, torchvision, nvidia-*, cuda-*, triton
+# ============================================================================== #
+
+FILENAME                                                          | PACKAGE                | VERSION      | WHEEL TAGS
+----------------------------------------------------------------------------------------------------------------------------------
+certifi-2026.7.22-py3-none-any.whl                                | certifi                | 2026.7.22    | py3-none-any
+charset_normalizer-3.5.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl | charset_normalizer     | 3.5.1        | cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64
+contourpy-1.3.3-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl | contourpy              | 1.3.3        | cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64
+cycler-0.12.1-py3-none-any.whl                                    | cycler                 | 0.12.1       | py3-none-any
+filelock-4.0.1-py3-none-any.whl                                   | filelock               | 4.0.1        | py3-none-any
+fonttools-4.65.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl | fonttools              | 4.65.0       | cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64
+idna-3.20-py3-none-any.whl                                        | idna                   | 3.20         | py3-none-any
+kiwisolver-1.5.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl | kiwisolver             | 1.5.1        | cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64
+matplotlib-3.11.2-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl | matplotlib             | 3.11.2       | cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64
+numpy-1.26.4-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl | numpy                  | 1.26.4       | cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64
+opencv_python-4.11.0.86-cp37-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl | opencv_python          | 4.11.0.86    | cp37-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64
+packaging-26.3-py3-none-any.whl                                   | packaging              | 26.3         | py3-none-any
+pandas-3.0.6-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl | pandas                 | 3.0.6        | cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64
+pillow-12.3.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl | pillow                 | 12.3.0       | cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64
+psutil-7.2.2-cp36-abi3-manylinux2010_x86_64.manylinux_2_12_x86_64.manylinux_2_28_x86_64.whl | psutil                 | 7.2.2        | cp36-abi3-manylinux2010_x86_64.manylinux_2_12_x86_64.manylinux_2_28_x86_64
+py_cpuinfo-9.0.0-py3-none-any.whl                                 | py_cpuinfo             | 9.0.0        | py3-none-any
+pyparsing-3.3.2-py3-none-any.whl                                  | pyparsing              | 3.3.2        | py3-none-any
+python_dateutil-2.9.0.post0-py2.py3-none-any.whl                  | python_dateutil        | 2.9.0.post0  | py2.py3-none-any
+pyyaml-6.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl | pyyaml                 | 6.0.3        | cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64
+requests-2.34.2-py3-none-any.whl                                  | requests               | 2.34.2       | py3-none-any
+scipy-1.17.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl | scipy                  | 1.17.1       | cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64
+seaborn-0.13.2-py3-none-any.whl                                   | seaborn                | 0.13.2       | py3-none-any
+six-1.17.0-py2.py3-none-any.whl                                   | six                    | 1.17.0       | py2.py3-none-any
+tqdm-4.70.1-py3-none-any.whl                                      | tqdm                   | 4.70.1       | py3-none-any
+typing_extensions-4.16.0-py3-none-any.whl                         | typing_extensions      | 4.16.0       | py3-none-any
+ultralytics-8.2.103-py3-none-any.whl                              | ultralytics            | 8.2.103      | py3-none-any
+ultralytics_thop-2.1.6-py3-none-any.whl                           | ultralytics_thop       | 2.1.6        | py3-none-any
+urllib3-2.8.0-py3-none-any.whl                                    | urllib3                | 2.8.0        | py3-none-any

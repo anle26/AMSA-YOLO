@@ -1,0 +1,18 @@
+# ==============================================================================
+# Kaggle Base Image Environment Constraints (Documentation & Resolution)
+# ==============================================================================
+# WARNING: DO NOT USE THIS FILE TO DOWNLOAD WHEELS FOR TORCH OR TORCHVISION.
+#
+# These constraints document the exact preinstalled versions present in the
+# verified Kaggle RTX PRO 6000 Blackwell Server Edition container.
+#
+# Verified Kaggle runtime builds:
+#   torch == 2.10.0+cu128
+#   torchvision == 0.25.0+cu128
+#
+# These packages MUST be reused directly from Kaggle's base environment rather
+# than bundled into the wheelhouse.
+# ==============================================================================
+
+torch==2.10.0
+torchvision==0.25.0

@@ -1,0 +1,29 @@
+# ==============================================================================
+# AMSA-YOLO: Base Direct Dependency Specifications
+# ==============================================================================
+# This file pins the direct dependencies required for AMSA-YOLO reproduction.
+#
+# Baseline Ultralytics Version:
+#   ultralytics==8.2.103 (Final stable YOLOv8 series release, Sept 2024;
+#   see docs/ULTRALYTICS_VERSION_DECISION.md for full rationale).
+#
+# Constraints & Inclusions:
+# - torch, torchvision, CUDA libraries, and NVIDIA runtimes are strictly EXCLUDED
+#   because they are preinstalled on Kaggle (torch 2.10.0+cu128, torchvision 0.25.0+cu128).
+# - Candidate packages already declared as direct dependencies of `ultralytics`
+#   (numpy, matplotlib, opencv-python, pillow, pyyaml, psutil, requests)
+#   are resolved transitively through the solver to prevent pinning conflicts.
+# ==============================================================================
+
+# Core Object Detection Framework (Pinned baseline for YOLOv8 reproduction)
+ultralytics==8.2.103
+
+# Scientific Computing & Matrix Operations (Required by AMSA attention modules)
+scipy==1.17.1
+
+# Dataset Indexing, Evaluation Metrics & Tabular Analysis
+pandas==3.0.6
+
+# Progress Bars & Hardware Telemetry
+tqdm==4.70.1
+py-cpuinfo==9.0.0
