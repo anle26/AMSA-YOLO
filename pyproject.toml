@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "amsa-yolo"
+version = "0.1.0"
+description = "Reproducible offline implementation of AMSA-YOLO based on YOLOv8"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    { name = "Research Team" }
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff"
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/amsa", "src/training"]

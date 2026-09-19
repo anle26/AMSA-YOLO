@@ -1,0 +1,75 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Testing & static analysis
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Deep Learning experiments, data, and model weights
+datasets/
+runs/
+weights/
+checkpoints/
+*.pt
+*.pth
+*.onnx
+*.engine
+*.tflite
+
+# Wheelhouse / offline packages (do not track binary wheels)
+wheelhouse/*.whl
+!wheelhouse/.gitkeep
+
+# Logs
+logs/*
+!logs/.gitkeep
+*.log
+
+# Kaggle temporary working dirs and checkpoints
+kaggle/working/
+kaggle/temp/
+*.ipynb_checkpoints/
+.kaggle/
+
+# IDE and editor metadata
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
