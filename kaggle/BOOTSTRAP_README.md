@@ -53,5 +53,35 @@ bash /kaggle/input/<code-dataset>/bootstrap_offline.sh
    - `torch==2.10.0+cu128`
    - `torchvision==0.25.0+cu128`
    - CUDA Runtime `12.8` with native Blackwell (`sm_120`) kernel acceleration.
-3. **Installs Offline Wheels:** Installs all 28 non-torch packages (`ultralytics==8.2.103`, `numpy`, `scipy`, `pandas`, `opencv-python`, etc.) via `--no-index --find-links`.
-4. **Verifies Stack:** Runs an automated test validating device count, VRAM (94.97 GiB), compute capability (12.0), and package imports.
+3. **Installs Offline Wheels via `--no-deps`:** Installs all 28 non-torch packages (`ultralytics==8.2.103`, `numpy`, `scipy`, `pandas`, `opencv-python`, etc.) using:
+   ```bash
+   uv pip install \
+     --python /opt/venv/bin/python \
+     --offline \
+     --no-index \
+     --no-deps \
+     --find-links "${WHEELHOUSE_DIR}" \
+     -r "${REQ_FILE}"
+   ```
+   **Why `--no-deps` is intentional:**
+   - Kaggle's verified base image already provides PyTorch (`2.10.0+cu128`) and torchvision (`0.25.0+cu128`).
+   - `/opt/venv` is created with `--system-site-packages` to inherit this vendor-optimized stack directly.
+   - `requirements/wheelhouse.txt` represents an explicitly pinned, complete non-base dependency layer.
+   - Torch, torchvision, and NVIDIA runtime wheels are deliberately omitted from the wheelhouse.
+   - Allowing `uv` to resolve dependencies normally with `--offline --no-index --find-links` would incorrectly demand `torch` from the offline wheelhouse candidates because `ultralytics` declares `torch>=1.8.0`.
+   - Using `--no-deps` installs the exact, pre-pinned wheels without triggering the index-based resolver.
+4. **Verifies Dependency Consistency (`uv pip check`):**
+   Immediately after installation, runs:
+   ```bash
+   uv pip check --python /opt/venv/bin/python
+   ```
+   This validates that all installed packages and the inherited base stack form a fully satisfied, consistent dependency graph.
+5. **Verifies Runtime Functionality:**
+   Runs comprehensive verification validating:
+   - `import torch` and `import torchvision`
+   - `import ultralytics` and `from ultralytics import YOLO`
+   - Architecture initialization: `YOLO("yolov8s.yaml")` (zero network download)
+   - CUDA availability, VRAM (94.97 GiB), compute capability (12.0)
+   - CUDA tensor matrix multiplication test
+   - All core package imports (`numpy`, `scipy`, `pandas`, `cv2`, `PIL`, `yaml`, `tqdm`, `psutil`)
+

@@ -80,6 +80,8 @@ if bootstrap_script and os.path.isfile(bootstrap_script):
     bootstrap_returncode = boot_proc.returncode
 else:
     print("    bootstrap_offline.sh not found as standalone file. Running inline bootstrap with uv...")
+    # NOTE: Using --no-deps because Kaggle base provides torch/torchvision via --system-site-packages;
+    # wheelhouse represents the complete non-base layer and normal resolution would fail without torch wheel.
     boot_commands = f"""
     set -euo pipefail
     if ! command -v uv >/dev/null 2>&1; then
@@ -87,7 +89,8 @@ else:
         exit 1
     fi
     uv venv /opt/venv --python /usr/bin/python3 --system-site-packages --no-managed-python
-    uv pip install --python /opt/venv/bin/python --offline --no-index --find-links "{wheelhouse_dir}" $(find "{wheelhouse_dir}" -maxdepth 1 -name "*.whl")
+    uv pip install --python /opt/venv/bin/python --offline --no-index --no-deps --find-links "{wheelhouse_dir}" $(find "{wheelhouse_dir}" -maxdepth 1 -name "*.whl")
+    uv pip check --python /opt/venv/bin/python
     """
     boot_proc = subprocess.run(["bash", "-c", boot_commands], check=False)
     bootstrap_returncode = boot_proc.returncode

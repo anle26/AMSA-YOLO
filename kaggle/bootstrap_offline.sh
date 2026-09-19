@@ -123,12 +123,22 @@ fi
 echo "[+] Isolated environment ready: $(${VENV_PYTHON} --version)"
 
 # 6. Install wheelhouse dependencies using uv pip install (never pip)
-echo "[*] Installing offline wheelhouse dependencies via uv pip install..."
+# NOTE ON --no-deps INTENTIONALITY:
+# - Kaggle's verified base image already provides PyTorch (2.10.0+cu128) and torchvision (0.25.0+cu128).
+# - /opt/venv was created with --system-site-packages to inherit this vendor-optimized base stack.
+# - requirements/wheelhouse.txt represents an explicitly pinned, complete non-base dependency layer.
+# - The offline wheelhouse intentionally excludes torch, torchvision, and CUDA runtime wheels.
+# - Allowing uv to resolve dependencies with --no-index would fail because ultralytics declares
+#   torch>=1.8.0 as a dependency, which uv's offline resolver would attempt to locate within the wheelhouse.
+# - Using --no-deps bypasses index-based dependency resolution while installing the exact pinned wheels.
+# - Complete dependency consistency is verified immediately afterward via `uv pip check`.
+echo "[*] Installing offline wheelhouse dependencies via uv pip install (--no-deps)..."
 if [ -n "${REQ_FILE}" ] && [ -f "${REQ_FILE}" ]; then
     uv pip install \
       --python "${VENV_PYTHON}" \
       --offline \
       --no-index \
+      --no-deps \
       --find-links "${WHEELHOUSE_DIR}" \
       -r "${REQ_FILE}"
 else
@@ -136,12 +146,19 @@ else
       --python "${VENV_PYTHON}" \
       --offline \
       --no-index \
+      --no-deps \
       --find-links "${WHEELHOUSE_DIR}" \
       $(find "${WHEELHOUSE_DIR}" -maxdepth 1 -name "*.whl")
 fi
 echo "[+] Offline installation complete."
 
-# 7. Comprehensive Runtime Verification (Parts C & D)
+# 7. Dependency Consistency Verification
+# Verify that all installed packages and inherited base packages satisfy all dependency requirements
+echo "[*] Verifying dependency consistency across virtual environment and base stack via uv pip check..."
+uv pip check --python "${VENV_PYTHON}"
+echo "[+] Dependency consistency verified: All requirements satisfied."
+
+# 8. Comprehensive Runtime Verification (Parts C & D)
 echo ""
 echo "================================================================================"
 echo " Executing Post-Bootstrap Runtime Verification"
