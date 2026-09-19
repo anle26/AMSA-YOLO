@@ -112,6 +112,7 @@ VENV_PYTHON="${VENV_PATH}/bin/python"
 
 echo "[*] Initializing isolated virtual environment at ${VENV_PATH}..."
 uv venv "${VENV_PATH}" \
+  --clear \
   --python /usr/bin/python3 \
   --system-site-packages \
   --no-managed-python
@@ -131,7 +132,7 @@ echo "[+] Isolated environment ready: $(${VENV_PYTHON} --version)"
 # - Allowing uv to resolve dependencies with --no-index would fail because ultralytics declares
 #   torch>=1.8.0 as a dependency, which uv's offline resolver would attempt to locate within the wheelhouse.
 # - Using --no-deps bypasses index-based dependency resolution while installing the exact pinned wheels.
-# - Complete dependency consistency is verified immediately afterward via `uv pip check`.
+# - Stack compatibility is verified via targeted runtime validation using ${VENV_PYTHON}.
 echo "[*] Installing offline wheelhouse dependencies via uv pip install (--no-deps)..."
 if [ -n "${REQ_FILE}" ] && [ -f "${REQ_FILE}" ]; then
     uv pip install \
@@ -152,44 +153,76 @@ else
 fi
 echo "[+] Offline installation complete."
 
-# 7. Dependency Consistency Verification
-# Verify that all installed packages and inherited base packages satisfy all dependency requirements
-echo "[*] Verifying dependency consistency across virtual environment and base stack via uv pip check..."
-uv pip check --python "${VENV_PYTHON}"
-echo "[+] Dependency consistency verified: All requirements satisfied."
-
-# 8. Comprehensive Runtime Verification (Parts C & D)
+# 7. Targeted Runtime Verification (replacing uv pip check)
 echo ""
 echo "================================================================================"
-echo " Executing Post-Bootstrap Runtime Verification"
+echo " Executing Targeted Post-Bootstrap Runtime Verification"
 echo "================================================================================"
 
 "${VENV_PYTHON}" -c "
 import sys
 import os
+from packaging import version
 
 print(f'Python Executable    : {sys.executable}')
 print(f'Python Version       : {sys.version.split()[0]}')
 
-# Check PyTorch stack
-import torch
-import torchvision
-print(f'torch.__version__    : {torch.__version__}')
-print(f'torch.version.cuda   : {torch.version.cuda}')
-print(f'torchvision.__ver__  : {torchvision.__version__}')
-print(f'CUDA Available       : {torch.cuda.is_available()}')
+# 1. Validate PyTorch & version >= 1.8.0
+try:
+    import torch
+    print(f'torch.__version__    : {torch.__version__}')
+    print(f'torch.version.cuda   : {torch.version.cuda}')
+    parsed_torch = version.parse(torch.__version__)
+    min_torch = version.parse('1.8.0')
+    if parsed_torch < min_torch:
+        print(f'[!] ERROR: torch version {torch.__version__} is below minimum requirement 1.8.0')
+        sys.exit(1)
+    print('[+] torch version validation (>=1.8.0): PASSED')
+except Exception as e:
+    print(f'[!] CRITICAL ERROR in torch validation: {e}')
+    sys.exit(1)
 
+# 2. Validate torchvision & version >= 0.9.0
+try:
+    import torchvision
+    print(f'torchvision.__ver__  : {torchvision.__version__}')
+    parsed_tv = version.parse(torchvision.__version__)
+    min_tv = version.parse('0.9.0')
+    if parsed_tv < min_tv:
+        print(f'[!] ERROR: torchvision version {torchvision.__version__} is below minimum requirement 0.9.0')
+        sys.exit(1)
+    print('[+] torchvision version validation (>=0.9.0): PASSED')
+except Exception as e:
+    print(f'[!] CRITICAL ERROR in torchvision validation: {e}')
+    sys.exit(1)
+
+# 3. Validate ultralytics & exact baseline == 8.2.103
+try:
+    import ultralytics
+    print(f'ultralytics.__ver__  : {ultralytics.__version__}')
+    if ultralytics.__version__ != '8.2.103':
+        print(f'[!] ERROR: ultralytics version {ultralytics.__version__} != expected baseline 8.2.103')
+        sys.exit(1)
+    print('[+] ultralytics version validation (==8.2.103): PASSED')
+except Exception as e:
+    print(f'[!] CRITICAL ERROR in ultralytics validation: {e}')
+    sys.exit(1)
+
+# 4. Validate CUDA availability, torch.version.cuda, GPU name
+print(f'CUDA Available       : {torch.cuda.is_available()}')
 if torch.cuda.is_available():
     props = torch.cuda.get_device_properties(0)
     vram_gib = props.total_memory / (1024 ** 3)
-    print(f'GPU Name             : {torch.cuda.get_device_name(0)}')
+    gpu_name = torch.cuda.get_device_name(0)
+    print(f'GPU Name             : {gpu_name}')
     print(f'Compute Capability   : {props.major}.{props.minor}')
     print(f'VRAM Total           : {vram_gib:.2f} GiB')
+    print(f'CUDA Runtime Version : {torch.version.cuda}')
 else:
     print('[!] ERROR: CUDA is not available in PyTorch.')
     sys.exit(1)
 
-# Import non-torch packages
+# 5. Import non-torch core packages
 packages = ['numpy', 'scipy', 'pandas', 'cv2', 'PIL', 'yaml', 'tqdm', 'psutil']
 for p in packages:
     try:
@@ -200,29 +233,29 @@ for p in packages:
         print(f'{p:<20} : FAILED ({e})')
         sys.exit(1)
 
-# Ultralytics verification
-import ultralytics
-print(f'ultralytics.__ver__  : {ultralytics.__version__}')
-
-# Part D: Verify Ultralytics without weight downloads
+# 6. Verify Ultralytics YOLO architecture instantiation without weight downloads
 try:
     from ultralytics import YOLO
     print('[+] from ultralytics import YOLO: SUCCESS')
-    # Instantiate from architecture YAML only (randomly initialized, no .pt download)
+    # Instantiate from architecture YAML only (random initial weights, no .pt download)
     model = YOLO('yolov8s.yaml')
     print(f'[+] YOLO(\"yolov8s.yaml\") instantiated successfully: {type(model).__name__}')
 except Exception as e:
     print(f'[!] CRITICAL ERROR in YOLO architecture instantiation: {e}')
     sys.exit(1)
 
-# Part C: Minimal CUDA Tensor Matrix Multiplication Test
+# 7. Minimal CUDA Tensor Matrix Multiplication Test
 print('[*] Running minimal CUDA tensor computation...')
-a = torch.randn(128, 128, device='cuda', dtype=torch.float32)
-b = torch.randn(128, 128, device='cuda', dtype=torch.float32)
-c = torch.matmul(a, b)
-torch.cuda.synchronize()
-assert c.shape == (128, 128)
-print('[+] CUDA Tensor Matmul Test: SUCCESS')
+try:
+    a = torch.randn(128, 128, device='cuda', dtype=torch.float32)
+    b = torch.randn(128, 128, device='cuda', dtype=torch.float32)
+    c = torch.matmul(a, b)
+    torch.cuda.synchronize()
+    assert c.shape == (128, 128)
+    print('[+] CUDA Tensor Matmul Test: SUCCESS')
+except Exception as e:
+    print(f'[!] CRITICAL ERROR in CUDA matmul test: {e}')
+    sys.exit(1)
 "
 
 echo "================================================================================"

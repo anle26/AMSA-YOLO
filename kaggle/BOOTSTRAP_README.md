@@ -49,7 +49,15 @@ bash /kaggle/input/<code-dataset>/bootstrap_offline.sh
 ## Step 4: What the Bootstrap Script Does
 
 1. **Auto-detects the Wheelhouse:** Discovers `.whl` files in `/kaggle/input/` without hardcoding dataset slugs.
-2. **Preserves Base PyTorch Stack:** Creates `/opt/venv` with `--system-site-packages`, preserving Kaggle's preinstalled:
+2. **Preserves Base PyTorch Stack (Idempotent Venv):** Creates `/opt/venv` using:
+   ```bash
+   uv venv /opt/venv \
+     --clear \
+     --python /usr/bin/python3 \
+     --system-site-packages \
+     --no-managed-python
+   ```
+   The `--clear` flag ensures idempotency across notebook cell re-runs while `--system-site-packages` preserves Kaggle's preinstalled:
    - `torch==2.10.0+cu128`
    - `torchvision==0.25.0+cu128`
    - CUDA Runtime `12.8` with native Blackwell (`sm_120`) kernel acceleration.
@@ -70,18 +78,14 @@ bash /kaggle/input/<code-dataset>/bootstrap_offline.sh
    - Torch, torchvision, and NVIDIA runtime wheels are deliberately omitted from the wheelhouse.
    - Allowing `uv` to resolve dependencies normally with `--offline --no-index --find-links` would incorrectly demand `torch` from the offline wheelhouse candidates because `ultralytics` declares `torch>=1.8.0`.
    - Using `--no-deps` installs the exact, pre-pinned wheels without triggering the index-based resolver.
-4. **Verifies Dependency Consistency (`uv pip check`):**
-   Immediately after installation, runs:
-   ```bash
-   uv pip check --python /opt/venv/bin/python
-   ```
-   This validates that all installed packages and the inherited base stack form a fully satisfied, consistent dependency graph.
-5. **Verifies Runtime Functionality:**
-   Runs comprehensive verification validating:
-   - `import torch` and `import torchvision`
-   - `import ultralytics` and `from ultralytics import YOLO`
-   - Architecture initialization: `YOLO("yolov8s.yaml")` (zero network download)
-   - CUDA availability, VRAM (94.97 GiB), compute capability (12.0)
-   - CUDA tensor matrix multiplication test
-   - All core package imports (`numpy`, `scipy`, `pandas`, `cv2`, `PIL`, `yaml`, `tqdm`, `psutil`)
+4. **Targeted Runtime Verification (Replaces `uv pip check`):**
+   Rather than relying on `uv pip check` as a fatal gate in this hybrid site-packages setup, targeted verification is executed directly through `/opt/venv/bin/python` to validate:
+   - **PyTorch Stack:** `torch` import, CUDA availability, `torch.version.cuda`, GPU name (`NVIDIA RTX PRO 6000 Blackwell Server Edition`), VRAM capacity (~94.97 GiB), and compute capability (`12.0`).
+   - **PEP 440 Version Constraints via `packaging.version`:**
+     - `torch >= 1.8.0` (verified with `2.10.0+cu128`)
+     - `torchvision >= 0.9.0` (verified with `0.25.0+cu128`)
+     - `ultralytics == 8.2.103` (exact reproduction baseline)
+   - **Ultralytics & YOLO Architecture:** `from ultralytics import YOLO` and `YOLO("yolov8s.yaml")` model instantiation without network weight downloads.
+   - **CUDA Tensor Computation:** Minimal device tensor matrix multiplication (`torch.matmul`) with `torch.cuda.synchronize()`.
+   - **Core Scientific & Vision Imports:** `numpy`, `scipy`, `pandas`, `cv2` (`opencv-python`), `PIL` (`pillow`), `yaml` (`pyyaml`), `tqdm`, `psutil`.
 

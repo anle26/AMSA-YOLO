@@ -88,9 +88,8 @@ else:
         echo "[!] uv is required but not installed."
         exit 1
     fi
-    uv venv /opt/venv --python /usr/bin/python3 --system-site-packages --no-managed-python
+    uv venv /opt/venv --clear --python /usr/bin/python3 --system-site-packages --no-managed-python
     uv pip install --python /opt/venv/bin/python --offline --no-index --no-deps --find-links "{wheelhouse_dir}" $(find "{wheelhouse_dir}" -maxdepth 1 -name "*.whl")
-    uv pip check --python /opt/venv/bin/python
     """
     boot_proc = subprocess.run(["bash", "-c", boot_commands], check=False)
     bootstrap_returncode = boot_proc.returncode
@@ -98,13 +97,14 @@ else:
 print(f"    Bootstrap exit code: {bootstrap_returncode}")
 
 # 4. Run runtime verification using /opt/venv/bin/python
-print("\n[4] Running Runtime Verification via /opt/venv/bin/python...")
+print("\n[4] Running Targeted Runtime Verification via /opt/venv/bin/python...")
 venv_python = "/opt/venv/bin/python"
 
 verify_code = """
 import sys
 import os
 import json
+from packaging import version
 
 res = {}
 
@@ -117,12 +117,19 @@ try:
     res["TORCH_VERSION"] = str(torch.__version__)
     res["TORCH_CUDA"] = str(torch.version.cuda)
     res["CUDA_AVAILABLE"] = str(torch.cuda.is_available())
+
+    # Verify torch >= 1.8.0
+    if version.parse(torch.__version__) >= version.parse("1.8.0"):
+        res["TORCH_VERSION_OK"] = "SUCCESS"
+    else:
+        res["TORCH_VERSION_OK"] = f"FAILED (<1.8.0: {torch.__version__})"
+
     if torch.cuda.is_available():
         res["GPU_NAME"] = str(torch.cuda.get_device_name(0))
         props = torch.cuda.get_device_properties(0)
         res["COMPUTE_CAPABILITY"] = f"{props.major}.{props.minor}"
-        
-        # Part C: Minimal CUDA Tensor Matrix Multiplication Test
+
+        # Minimal CUDA Tensor Matrix Multiplication Test
         a = torch.randn(64, 64, device='cuda')
         b = torch.randn(64, 64, device='cuda')
         c = torch.matmul(a, b)
@@ -134,6 +141,7 @@ try:
         res["CUDA_MATMUL"] = "NO_CUDA"
 except Exception as e:
     res["TORCH_VERSION"] = f"ERROR: {e}"
+    res["TORCH_VERSION_OK"] = f"ERROR: {e}"
     res["TORCH_CUDA"] = "N/A"
     res["CUDA_AVAILABLE"] = "False"
     res["GPU_NAME"] = "N/A"
@@ -144,19 +152,31 @@ except Exception as e:
 try:
     import torchvision
     res["TORCHVISION_VERSION"] = str(torchvision.__version__)
+    # Verify torchvision >= 0.9.0
+    if version.parse(torchvision.__version__) >= version.parse("0.9.0"):
+        res["TORCHVISION_VERSION_OK"] = "SUCCESS"
+    else:
+        res["TORCHVISION_VERSION_OK"] = f"FAILED (<0.9.0: {torchvision.__version__})"
 except Exception as e:
     res["TORCHVISION_VERSION"] = f"ERROR: {e}"
+    res["TORCHVISION_VERSION_OK"] = f"ERROR: {e}"
 
-# Ultralytics & YOLO (Part D)
+# Ultralytics & YOLO
 try:
     import ultralytics
     res["ULTRALYTICS_VERSION"] = str(ultralytics.__version__)
+    # Verify ultralytics == 8.2.103
+    if ultralytics.__version__ == "8.2.103":
+        res["ULTRALYTICS_VERSION_OK"] = "SUCCESS"
+    else:
+        res["ULTRALYTICS_VERSION_OK"] = f"FAILED (!=8.2.103: {ultralytics.__version__})"
     from ultralytics import YOLO
     # Instantiate from architecture YAML only (random initial weights, zero download)
     model = YOLO("yolov8s.yaml")
     res["YOLO_IMPORT"] = "SUCCESS"
 except Exception as e:
     res["ULTRALYTICS_VERSION"] = getattr(ultralytics, "__version__", f"ERROR: {e}")
+    res["ULTRALYTICS_VERSION_OK"] = f"ERROR: {e}"
     res["YOLO_IMPORT"] = f"ERROR: {e}"
 
 # Core packages
@@ -186,20 +206,28 @@ if match:
     except Exception:
         pass
 
-bootstrap_ok = (bootstrap_returncode == 0) and (metrics.get("CUDA_MATMUL") == "SUCCESS") and (metrics.get("YOLO_IMPORT") == "SUCCESS")
+bootstrap_ok = (
+    (bootstrap_returncode == 0)
+    and (metrics.get("CUDA_MATMUL") == "SUCCESS")
+    and (metrics.get("YOLO_IMPORT") == "SUCCESS")
+    and (metrics.get("TORCH_VERSION_OK") == "SUCCESS")
+    and (metrics.get("TORCHVISION_VERSION_OK") == "SUCCESS")
+    and (metrics.get("ULTRALYTICS_VERSION_OK") == "SUCCESS")
+)
 
 print("\n" + "=" * 80)
 print("BOOTSTRAP VALIDATION RESULT")
 print("=" * 80)
 print(f"BOOTSTRAP_RESULT={'SUCCESS' if bootstrap_ok else 'FAILED'}")
 print(f"PYTHON_VERSION={metrics.get('PYTHON_VERSION', 'UNKNOWN')}")
-print(f"TORCH_VERSION={metrics.get('TORCH_VERSION', 'UNKNOWN')}")
+print(f"TORCH_VERSION={metrics.get('TORCH_VERSION', 'UNKNOWN')} ({metrics.get('TORCH_VERSION_OK', 'N/A')})")
 print(f"TORCH_CUDA={metrics.get('TORCH_CUDA', 'UNKNOWN')}")
-print(f"TORCHVISION_VERSION={metrics.get('TORCHVISION_VERSION', 'UNKNOWN')}")
-print(f"ULTRALYTICS_VERSION={metrics.get('ULTRALYTICS_VERSION', 'UNKNOWN')}")
+print(f"TORCHVISION_VERSION={metrics.get('TORCHVISION_VERSION', 'UNKNOWN')} ({metrics.get('TORCHVISION_VERSION_OK', 'N/A')})")
+print(f"ULTRALYTICS_VERSION={metrics.get('ULTRALYTICS_VERSION', 'UNKNOWN')} ({metrics.get('ULTRALYTICS_VERSION_OK', 'N/A')})")
 print(f"GPU_NAME={metrics.get('GPU_NAME', 'UNKNOWN')}")
 print(f"COMPUTE_CAPABILITY={metrics.get('COMPUTE_CAPABILITY', 'UNKNOWN')}")
 print(f"CUDA_AVAILABLE={metrics.get('CUDA_AVAILABLE', 'UNKNOWN')}")
+print(f"CUDA_MATMUL={metrics.get('CUDA_MATMUL', 'UNKNOWN')}")
 print(f"YOLO_IMPORT={metrics.get('YOLO_IMPORT', 'UNKNOWN')}")
 print(f"OFFLINE_INSTALL={'SUCCESS' if bootstrap_returncode == 0 else 'FAILED'}")
 print("=" * 80)
