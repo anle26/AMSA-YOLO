@@ -16,8 +16,7 @@ import yaml
 from src.training.callbacks import disable_external_logging_callbacks
 
 
-# Standard reproduction training configuration
-# Corresponds to standard YOLOv8s benchmark settings and paper methodology
+# Standard benchmark training configuration (retained for backward compatibility)
 DEFAULT_TRAINING_CONFIG: Dict[str, Any] = {
     # Architecture & input
     "imgsz": 640,
@@ -60,11 +59,67 @@ DEFAULT_TRAINING_CONFIG: Dict[str, Any] = {
     "exist_ok": True,
     "verbose": True,
 }
+BENCHMARK_TRAINING_CONFIG = DEFAULT_TRAINING_CONFIG
+
+# Paper-faithful reproduction training configuration
+# Reference: Neural Networks, Volume 197 (2026), Article 108545.
+PAPER_REPRO_TRAINING_CONFIG: Dict[str, Any] = {
+    # Architecture & input
+    "imgsz": 640,                  # EXACT_FROM_PAPER
+    "epochs": 300,                 # EXACT_FROM_PAPER
+    "batch": 16,                   # EXACT_FROM_PAPER
+    # Optimization
+    "optimizer": "AdamW",          # EXACT_FROM_PAPER
+    "lr0": 0.01,                   # EXACT_FROM_PAPER (Base YOLO initial learning rate)
+    "amsa_lr0": 0.001,             # EXACT_FROM_PAPER (AMSA lateral modules fine-tuning learning rate)
+    "lrf": 0.01,                   # IMPLEMENTATION_ASSUMPTION (Final lr = 0.01 * 0.01 = 0.0001)
+    "momentum": 0.937,             # IMPLEMENTATION_ASSUMPTION (AdamW beta1; default Ultralytics)
+    "weight_decay": 0.0005,        # EXACT_FROM_PAPER
+    "warmup_epochs": 3.0,          # EXACT_FROM_PAPER
+    "warmup_momentum": 0.8,        # IMPLEMENTATION_ASSUMPTION
+    "warmup_bias_lr": 0.0,         # IMPLEMENTATION_ASSUMPTION (Standard for AdamW)
+    "cos_lr": True,                # EXACT_FROM_PAPER (Cosine annealing learning rate schedule)
+    # Augmentations
+    "mosaic": 0.5,                 # EXACT_FROM_PAPER
+    "mixup": 0.1,                  # EXACT_FROM_PAPER
+    "fliplr": 0.5,                 # EXACT_FROM_PAPER
+    "scale": 0.5,                  # ULTRALYTICS_APPROXIMATION (Random scaling range [1 - 0.5, 1 + 0.5] = [0.5, 1.5])
+    "hsv_h": 0.015,                # IMPLEMENTATION_ASSUMPTION (Standard YOLO HSV augmentation enabled)
+    "hsv_s": 0.7,                  # IMPLEMENTATION_ASSUMPTION
+    "hsv_v": 0.4,                  # IMPLEMENTATION_ASSUMPTION
+    "degrees": 0.0,                # IMPLEMENTATION_ASSUMPTION
+    "translate": 0.1,              # IMPLEMENTATION_ASSUMPTION
+    "shear": 0.0,                  # IMPLEMENTATION_ASSUMPTION
+    "perspective": 0.0,            # IMPLEMENTATION_ASSUMPTION
+    "flipud": 0.0,                 # IMPLEMENTATION_ASSUMPTION
+    # Loss Configuration
+    "scale_aware_loss": True,      # EXACT_FROM_PAPER / ULTRALYTICS_APPROXIMATION
+    "box": 7.5,                    # IMPLEMENTATION_ASSUMPTION
+    "cls": 0.5,                    # IMPLEMENTATION_ASSUMPTION
+    "dfl": 1.5,                    # IMPLEMENTATION_ASSUMPTION
+    # Strategy & Initialization (IMPLEMENTATION_ASSUMPTION: stage boundary is not disclosed in paper)
+    "stage1_epochs": 300,          # IMPLEMENTATION_ASSUMPTION (Stage 1 baseline training epochs)
+    "stage2_epochs": 300,          # IMPLEMENTATION_ASSUMPTION (Stage 2/3 AMSA fine-tuning epochs)
+    "initialization": "pretrained",# IMPLEMENTATION_ASSUMPTION (Configurable: "pretrained" or "scratch")
+    # Precision & Execution
+    "amp": True,                   # IMPLEMENTATION_ASSUMPTION
+    "seed": 0,                     # IMPLEMENTATION_ASSUMPTION
+    "deterministic": True,         # IMPLEMENTATION_ASSUMPTION
+    "workers": 8,                  # IMPLEMENTATION_ASSUMPTION
+    "device": 0,                   # IMPLEMENTATION_ASSUMPTION
+    "val": True,                   # IMPLEMENTATION_ASSUMPTION
+    "plots": True,                 # IMPLEMENTATION_ASSUMPTION
+    "save": True,                  # IMPLEMENTATION_ASSUMPTION
+    "save_period": 10,             # IMPLEMENTATION_ASSUMPTION
+    "exist_ok": True,              # IMPLEMENTATION_ASSUMPTION
+    "verbose": True,               # IMPLEMENTATION_ASSUMPTION
+}
 
 
 def get_training_args(
     model_type: str,
     data_path: Union[str, Path],
+    profile: str = "benchmark",
     project: str = "runs/visdrone",
     name: Optional[str] = None,
     epochs: Optional[int] = None,
@@ -72,22 +127,29 @@ def get_training_args(
     imgsz: Optional[int] = None,
     device: Optional[Union[int, str]] = None,
     workers: Optional[int] = None,
+    scale_aware_loss: Optional[bool] = None,
+    initialization: Optional[str] = None,
+    stage1_epochs: Optional[int] = None,
+    stage2_epochs: Optional[int] = None,
     extra_overrides: Optional[Dict[str, Any]] = None,
     resume: bool = False,
 ) -> Dict[str, Any]:
     """
-    Generate the training argument dictionary for a benchmark run.
+    Generate the training argument dictionary for a benchmark or paper reproduction run.
 
     Args:
         model_type: 'baseline' or 'amsa'.
         data_path: Path to dataset YAML configuration.
+        profile: 'benchmark' (default) or 'paper_repro'.
         project: Root output directory. Default: 'runs/visdrone'.
-        name: Subdirectory name. If None, defaults to model_type.
+        name: Subdirectory name. Defaults to model_type (or 'paper_<model>' for paper_repro).
         epochs: Optional epoch override.
         batch: Optional batch size override.
         imgsz: Optional image size override.
         device: Optional device override (e.g. 0 or 'cpu').
         workers: Optional workers count override.
+        scale_aware_loss: Optional override for scale-aware loss.
+        initialization: Optional override ('pretrained' or 'scratch').
         extra_overrides: Optional additional hyperparameter overrides.
         resume: Whether to resume training from an existing checkpoint.
 
@@ -97,10 +159,20 @@ def get_training_args(
     if model_type not in ("baseline", "amsa"):
         raise ValueError(f"Invalid model_type '{model_type}'. Must be 'baseline' or 'amsa'.")
 
-    args = deepcopy(DEFAULT_TRAINING_CONFIG)
+    if profile == "benchmark":
+        base_cfg = DEFAULT_TRAINING_CONFIG
+        default_name = model_type
+    elif profile == "paper_repro":
+        base_cfg = PAPER_REPRO_TRAINING_CONFIG
+        default_name = f"paper_{model_type}"
+    else:
+        raise ValueError(f"Invalid profile '{profile}'. Must be 'benchmark' or 'paper_repro'.")
+
+    args = deepcopy(base_cfg)
     args["data"] = str(data_path)
     args["project"] = str(project)
-    args["name"] = name if name is not None else model_type
+    args["name"] = name if name is not None else default_name
+    args["profile"] = profile
 
     if epochs is not None:
         args["epochs"] = int(epochs)
@@ -112,6 +184,14 @@ def get_training_args(
         args["device"] = device
     if workers is not None:
         args["workers"] = int(workers)
+    if scale_aware_loss is not None:
+        args["scale_aware_loss"] = bool(scale_aware_loss)
+    if initialization is not None:
+        args["initialization"] = str(initialization)
+    if stage1_epochs is not None:
+        args["stage1_epochs"] = int(stage1_epochs)
+    if stage2_epochs is not None:
+        args["stage2_epochs"] = int(stage2_epochs)
 
     if extra_overrides:
         args.update(extra_overrides)
@@ -128,6 +208,7 @@ def resolve_resume_checkpoint(
     resume_from: Optional[Union[str, Path]] = None,
     project: Union[str, Path] = "runs/visdrone",
     name: Optional[str] = None,
+    profile: str = "benchmark",
 ) -> Optional[Path]:
     """
     Resolve and validate checkpoint path for training resumption.
@@ -137,7 +218,8 @@ def resolve_resume_checkpoint(
         resume: If True, automatically looks for <project>/<name>/weights/last.pt.
         resume_from: Explicit path to checkpoint file.
         project: Root output directory (default: 'runs/visdrone').
-        name: Experiment run name (defaults to model_type).
+        name: Experiment run name (defaults to model_type or 'paper_<model>').
+        profile: Training profile ('benchmark' or 'paper_repro').
 
     Returns:
         Optional[Path]: Resolved Path to checkpoint file, or None if fresh run.
@@ -161,7 +243,8 @@ def resolve_resume_checkpoint(
         return explicit_path
 
     # Automatic resume path: <project>/<name>/weights/last.pt
-    run_name = name if name is not None else model_type
+    default_name = f"paper_{model_type}" if profile == "paper_repro" else model_type
+    run_name = name if name is not None else default_name
     auto_path = (Path(project) / run_name / "weights" / "last.pt").resolve()
     if not auto_path.is_file():
         raise FileNotFoundError(

@@ -1,0 +1,65 @@
+# Paper Reproduction Configuration: AMSA-YOLO on VisDrone2019
+# Reference: "AMSA-YOLO: Real-time object detection with adaptive multi-scale attention mechanism"
+# Neural Networks, Volume 197 (2026), Article 108545.
+
+# Taxonomy:
+# EXACT_FROM_PAPER: Directly reported in paper text/tables.
+# ULTRALYTICS_APPROXIMATION: Closest defensible mapping to Ultralytics 8.2.103 anchor-free mechanics.
+# IMPLEMENTATION_ASSUMPTION: Unspecified in paper; principled default chosen.
+
+# Architecture & Input
+imgsz: 640                  # EXACT_FROM_PAPER
+epochs: 300                 # EXACT_FROM_PAPER
+batch: 16                   # EXACT_FROM_PAPER
+
+# Optimization
+optimizer: AdamW            # EXACT_FROM_PAPER
+lr0: 0.01                   # EXACT_FROM_PAPER (Base YOLO initial learning rate)
+amsa_lr0: 0.001             # EXACT_FROM_PAPER (AMSA lateral modules fine-tuning learning rate)
+lrf: 0.01                   # IMPLEMENTATION_ASSUMPTION (Final lr factor: 0.01 * lr0 = 0.0001)
+momentum: 0.937             # IMPLEMENTATION_ASSUMPTION (AdamW beta1; default Ultralytics)
+weight_decay: 0.0005        # EXACT_FROM_PAPER
+warmup_epochs: 3.0          # EXACT_FROM_PAPER
+warmup_momentum: 0.8        # IMPLEMENTATION_ASSUMPTION
+warmup_bias_lr: 0.0         # IMPLEMENTATION_ASSUMPTION (Recommended standard for AdamW)
+cos_lr: true                # EXACT_FROM_PAPER (Cosine annealing learning rate schedule)
+
+# Augmentation
+mosaic: 0.5                 # EXACT_FROM_PAPER
+mixup: 0.1                  # EXACT_FROM_PAPER
+fliplr: 0.5                 # EXACT_FROM_PAPER
+scale: 0.5                  # ULTRALYTICS_APPROXIMATION (Maps to [1 - 0.5, 1 + 0.5] = [0.5, 1.5])
+hsv_h: 0.015                # IMPLEMENTATION_ASSUMPTION (Standard YOLO HSV augmentation enabled)
+hsv_s: 0.7                  # IMPLEMENTATION_ASSUMPTION
+hsv_v: 0.4                  # IMPLEMENTATION_ASSUMPTION
+degrees: 0.0                # IMPLEMENTATION_ASSUMPTION
+translate: 0.1              # IMPLEMENTATION_ASSUMPTION
+shear: 0.0                  # IMPLEMENTATION_ASSUMPTION
+perspective: 0.0            # IMPLEMENTATION_ASSUMPTION
+flipud: 0.0                 # IMPLEMENTATION_ASSUMPTION
+
+# Loss Configuration
+scale_aware_loss: true      # EXACT_FROM_PAPER / ULTRALYTICS_APPROXIMATION
+box: 7.5                    # IMPLEMENTATION_ASSUMPTION (Ultralytics v8 default box loss gain)
+cls: 0.5                    # IMPLEMENTATION_ASSUMPTION (Ultralytics v8 default cls loss gain)
+dfl: 1.5                    # IMPLEMENTATION_ASSUMPTION (Ultralytics v8 default dfl loss gain)
+
+# Progressive Training Strategy (IMPLEMENTATION_ASSUMPTION: stage boundary is not disclosed in paper)
+# Stage 1: Train baseline YOLOv8s on VisDrone (or use trained baseline checkpoint)
+# Stage 2: Initialize AMSA-YOLO transferring trained baseline weights to backbone & neck/head
+# Stage 3: Fine-tune AMSA-YOLO with differential LR (Base: 0.01, AMSA: 0.001)
+stage1_epochs: 300          # IMPLEMENTATION_ASSUMPTION (Stage 1 baseline training epochs)
+stage2_epochs: 300          # IMPLEMENTATION_ASSUMPTION (Stage 2/3 AMSA fine-tuning epochs)
+initialization: pretrained  # IMPLEMENTATION_ASSUMPTION (Configurable: pretrained or scratch)
+
+# Precision & Execution
+amp: true                   # IMPLEMENTATION_ASSUMPTION
+seed: 0                     # IMPLEMENTATION_ASSUMPTION
+deterministic: true         # IMPLEMENTATION_ASSUMPTION
+workers: 8                  # IMPLEMENTATION_ASSUMPTION
+save: true                  # IMPLEMENTATION_ASSUMPTION
+save_period: 10             # IMPLEMENTATION_ASSUMPTION
+val: true                   # IMPLEMENTATION_ASSUMPTION
+plots: true                 # IMPLEMENTATION_ASSUMPTION
+exist_ok: true              # IMPLEMENTATION_ASSUMPTION
+verbose: true               # IMPLEMENTATION_ASSUMPTION

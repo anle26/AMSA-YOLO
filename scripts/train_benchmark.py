@@ -28,6 +28,7 @@ from ultralytics import YOLO
 from src.amsa import register_amsa
 from src.amsa.pretrained import transfer_yolov8s_weights
 from src.training import (
+    AMSAReproductionTrainer,
     disable_external_logging_callbacks,
     find_offline_file,
     get_training_args,
@@ -135,6 +136,50 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Explicit path to checkpoint file (e.g. /path/to/last.pt) to resume from.",
     )
+    parser.add_argument(
+        "--profile",
+        type=str,
+        default="benchmark",
+        choices=["benchmark", "paper_repro"],
+        help="Training profile: 'benchmark' (default benchmark parity) or 'paper_repro' (paper-faithful reproduction).",
+    )
+    parser.add_argument(
+        "--scale-aware-loss",
+        action="store_true",
+        default=None,
+        help="Explicitly enable paper scale-aware detection loss.",
+    )
+    parser.add_argument(
+        "--no-scale-aware-loss",
+        action="store_true",
+        default=False,
+        help="Explicitly disable paper scale-aware detection loss and use standard YOLO loss.",
+    )
+    parser.add_argument(
+        "--initialization",
+        type=str,
+        default=None,
+        choices=["pretrained", "scratch"],
+        help="Weight initialization policy: 'pretrained' (default) or 'scratch'.",
+    )
+    parser.add_argument(
+        "--baseline-weights",
+        type=str,
+        default=None,
+        help="Path to trained baseline weights for progressive Stage 2/3 AMSA training.",
+    )
+    parser.add_argument(
+        "--stage1-epochs",
+        type=int,
+        default=None,
+        help="Stage 1 baseline training epochs for progressive schedule (default: 300).",
+    )
+    parser.add_argument(
+        "--stage2-epochs",
+        type=int,
+        default=None,
+        help="Stage 2/3 AMSA fine-tuning epochs for progressive schedule (default: 300).",
+    )
     return parser.parse_args()
 
 
@@ -143,15 +188,19 @@ def setup_model(
     weights_path: Optional[str] = None,
     allow_untrained_fallback: bool = False,
     resume_checkpoint: Optional[Union[str, Path]] = None,
+    baseline_weights: Optional[Union[str, Path]] = None,
+    initialization: str = "pretrained",
 ) -> YOLO:
     """
-    Construct model and initialize weights according to fair benchmark protocol.
+    Construct model and initialize weights according to benchmark or paper reproduction protocol.
 
     Fresh Baseline:
-        Constructed from yolov8s.yaml and loads stock pretrained weights.
+        Constructed from yolov8s.yaml and loads stock pretrained weights (if initialization='pretrained').
     Fresh AMSA:
-        Constructed from configs/yolov8s-amsa.yaml and transfers stock pretrained
-        weights via transfer_yolov8s_weights(), leaving AMSA lateral modules fresh.
+        Constructed from configs/yolov8s-amsa.yaml and transfers weights via transfer_yolov8s_weights():
+        - From trained baseline checkpoint if baseline_weights is provided (progressive training)
+        - From stock yolov8s.pt if baseline_weights is None
+        AMSA lateral modules remain fresh in both cases.
     Resume Run (Baseline or AMSA):
         Loaded directly from verified checkpoint (e.g. weights/last.pt) preserving
         all weights, optimizer state, scheduler state, and training epoch counter.
@@ -169,6 +218,13 @@ def setup_model(
         disable_external_logging_callbacks(model)
         return model
 
+    if initialization == "scratch":
+        print(f"\n[Setup] Initializing {model_type.upper()} from scratch (random initialization)...")
+        model = YOLO("yolov8s.yaml" if model_type == "baseline" else "configs/yolov8s-amsa.yaml")
+        model.ckpt = {"model": model.model}
+        disable_external_logging_callbacks(model)
+        return model
+
     # Attempt to locate offline weights file
     resolved_weights: Optional[Path] = None
     if weights_path and weights_path.lower() != "none":
@@ -180,7 +236,7 @@ def setup_model(
         try:
             resolved_weights = find_offline_file("yolov8s.pt")
         except FileNotFoundError:
-            if not allow_untrained_fallback:
+            if not allow_untrained_fallback and not baseline_weights:
                 raise
 
     if model_type == "baseline":
@@ -194,11 +250,23 @@ def setup_model(
             print("[Setup] Baseline model loaded with stock pretrained weights.")
         else:
             print("[Setup] WARNING: No pretrained weights provided. Baseline initialized with random weights.")
+        model.ckpt = {"model": model.model}
 
     elif model_type == "amsa":
         print("\n[Setup] Initializing AMSA-YOLOv8s Model...")
         model = YOLO("configs/yolov8s-amsa.yaml")
-        if resolved_weights is not None:
+        if baseline_weights is not None:
+            b_path = Path(baseline_weights).resolve()
+            if not b_path.is_file():
+                raise FileNotFoundError(f"Specified baseline weights do not exist: {baseline_weights}")
+            print(f"[Setup] Progressive Training: Transferring trained baseline weights into AMSA from: {b_path}")
+            ckpt = torch.load(b_path, map_location="cpu")
+            report = transfer_yolov8s_weights(model, ckpt, strict_dtype=False)
+            print(report.summary())
+            assert report.total_transferred > 0, "Progressive weight transfer failed: zero keys transferred."
+            print(f"[Setup] Transferred {report.total_transferred} trained baseline keys into AMSA-YOLOv8s.")
+            print(f"[Setup] Protected {len(report.amsa_keys_left_fresh)} fresh AMSA parameters for fine-tuning.")
+        elif resolved_weights is not None:
             print(f"[Setup] Transferring pretrained weights into AMSA from: {resolved_weights}")
             ckpt = torch.load(resolved_weights, map_location="cpu")
             report = transfer_yolov8s_weights(model, ckpt, strict_dtype=False)
@@ -208,21 +276,23 @@ def setup_model(
             print(f"[Setup] Protected {len(report.amsa_keys_left_fresh)} fresh AMSA parameters.")
         else:
             # When testing offline without yolov8s.pt binary, transfer from an offline stock YOLO model
-            print("[Setup] WARNING: No external yolov8s.pt provided.")
+            print("[Setup] WARNING: No external yolov8s.pt or baseline checkpoint provided.")
             print("[Setup] Generating stock state_dict from offline yolov8s.yaml to verify transfer pipeline...")
             stock_ref = YOLO("yolov8s.yaml")
             report = transfer_yolov8s_weights(model, stock_ref.model.state_dict(), strict_dtype=False)
             print(report.summary())
             print(f"[Setup] Transferred {report.total_transferred} keys from reference stock architecture.")
+        model.ckpt = {"model": model.model}
 
     disable_external_logging_callbacks(model)
     return model
 
 
 def run_benchmark_training(args: argparse.Namespace) -> Dict[str, Any]:
-    """Execute benchmark training run."""
+    """Execute benchmark or paper reproduction training run."""
+    profile_label = "PAPER REPRODUCTION" if getattr(args, "profile", "benchmark") == "paper_repro" else "BENCHMARK"
     print("=" * 70)
-    print(f"       STARTING AMSA-YOLO BENCHMARK RUN: {args.model.upper()}       ")
+    print(f"       STARTING AMSA-YOLO {profile_label} RUN: {args.model.upper()}       ")
     print("=" * 70)
     start_time = time.time()
 
@@ -242,17 +312,44 @@ def run_benchmark_training(args: argparse.Namespace) -> Dict[str, Any]:
     print(f"[Config] Resolved Dataset YAML: {data_yaml}")
 
     # Determine run name and check for resume checkpoint
-    run_name = args.name if args.name else (f"smoke_{args.model}" if args.smoke else args.model)
+    profile = getattr(args, "profile", "benchmark")
+    if args.name:
+        run_name = args.name
+    elif args.smoke:
+        run_name = f"smoke_paper_{args.model}" if profile == "paper_repro" else f"smoke_{args.model}"
+    elif profile == "paper_repro":
+        run_name = f"paper_{args.model}"
+    else:
+        run_name = args.model
+
     resume_checkpoint = resolve_resume_checkpoint(
         model_type=args.model,
         resume=args.resume,
         resume_from=args.resume_from,
         project=args.project,
         name=run_name,
+        profile=profile,
     )
     is_resuming = resume_checkpoint is not None
     if is_resuming:
         print(f"[Resume] Resuming training from checkpoint: {resume_checkpoint}")
+
+    # Resolve progressive baseline weights if in paper reproduction mode for AMSA
+    baseline_weights = getattr(args, "baseline_weights", None)
+    if profile == "paper_repro" and args.model == "amsa" and not is_resuming and not baseline_weights:
+        candidate = (Path(args.project) / "paper_baseline" / "weights" / "best.pt").resolve()
+        if candidate.is_file():
+            baseline_weights = str(candidate)
+            print(f"[Progressive] Auto-discovered Stage 1 baseline weights at: {baseline_weights}")
+
+    # Resolve scale aware loss flag
+    scale_aware = None
+    if getattr(args, "scale_aware_loss", None):
+        scale_aware = True
+    elif getattr(args, "no_scale_aware_loss", False):
+        scale_aware = False
+
+    initialization = getattr(args, "initialization", None) or "pretrained"
 
     # Build model and setup initialization
     allow_fallback = args.smoke or args.dry_run
@@ -261,6 +358,8 @@ def run_benchmark_training(args: argparse.Namespace) -> Dict[str, Any]:
         weights_path=args.weights,
         allow_untrained_fallback=allow_fallback,
         resume_checkpoint=resume_checkpoint,
+        baseline_weights=baseline_weights,
+        initialization=initialization,
     )
 
     # Calculate model complexity
@@ -269,8 +368,19 @@ def run_benchmark_training(args: argparse.Namespace) -> Dict[str, Any]:
     print(f"[Architecture] Total Parameters:     {param_count:,} ({param_count / 1e6:.2f} M)")
     print(f"[Architecture] Trainable Parameters: {trainable_params:,} ({trainable_params / 1e6:.2f} M)")
 
-    # Prepare training arguments
-    epochs = 1 if args.smoke else args.epochs
+    # Progressive stage schedules (IMPLEMENTATION_ASSUMPTION: paper does not disclose stage boundary)
+    stage1_ep = getattr(args, "stage1_epochs", None) or 300
+    stage2_ep = getattr(args, "stage2_epochs", None) or 300
+
+    # Determine epochs for this execution
+    if args.epochs is not None:
+        epochs = int(args.epochs)
+    elif args.smoke:
+        epochs = 1
+    elif profile == "paper_repro":
+        epochs = stage1_ep if args.model == "baseline" else stage2_ep
+    else:
+        epochs = 300
     batch = 2 if (args.smoke and device == "cpu") else (4 if args.smoke else args.batch)
 
     extra_overrides: Dict[str, Any] = {}
@@ -282,6 +392,7 @@ def run_benchmark_training(args: argparse.Namespace) -> Dict[str, Any]:
     train_args = get_training_args(
         model_type=args.model,
         data_path=data_yaml,
+        profile=profile,
         project=args.project,
         name=run_name,
         epochs=epochs,
@@ -289,9 +400,38 @@ def run_benchmark_training(args: argparse.Namespace) -> Dict[str, Any]:
         imgsz=args.imgsz,
         device=device,
         workers=args.workers,
+        scale_aware_loss=scale_aware,
+        initialization=initialization,
+        stage1_epochs=stage1_ep,
+        stage2_epochs=stage2_ep,
         extra_overrides=extra_overrides,
         resume=is_resuming,
     )
+
+    # Runtime progressive schedule and optimization audit log
+    init_source = (
+        str(baseline_weights)
+        if baseline_weights
+        else (str(args.weights) if args.weights else ("scratch" if initialization == "scratch" else "stock yolov8s.pt"))
+    )
+    base_lr = train_args.get("lr0", 0.01)
+    amsa_lr = train_args.get("amsa_lr0", 0.001) if (args.model == "amsa" and profile == "paper_repro") else "N/A"
+    paper_reported_epochs = 300
+    cumulative_budget = stage1_ep + stage2_ep
+
+    print("\n" + "=" * 70)
+    print("       PROGRESSIVE SCHEDULE & OPTIMIZATION AUDIT       ")
+    print("=" * 70)
+    print(f"  - Current Run Target Epochs:                 {epochs}")
+    print(f"  - Paper-reported epochs:                     {paper_reported_epochs}")
+    print(f"  - Baseline stage epochs:                     {stage1_ep}")
+    print(f"  - AMSA fine-tuning epochs:                   {stage2_ep}")
+    print(f"  - Cumulative implementation training budget: {cumulative_budget}")
+    print(f"  - Progressive schedule status:               IMPLEMENTATION_ASSUMPTION")
+    print(f"  - Initialization Checkpoint:                 {init_source}")
+    print(f"  - Base LR:                                   {base_lr}")
+    print(f"  - AMSA LR:                                   {amsa_lr}")
+    print("=" * 70 + "\n")
 
     output_dir = Path(args.project) / run_name
     print(f"[Output] Dedicated Output Directory: {output_dir}")
@@ -304,28 +444,50 @@ def run_benchmark_training(args: argparse.Namespace) -> Dict[str, Any]:
         return {
             "status": "DRY_RUN_PASS",
             "model": args.model,
+            "profile": profile,
             "params": param_count,
             "train_args": train_args,
             "resumed": is_resuming,
             "resume_checkpoint": str(resume_checkpoint) if resume_checkpoint else None,
+            "stage1_epochs": stage1_ep,
+            "stage2_epochs": stage2_ep,
+            "paper_reported_epochs": paper_reported_epochs,
+            "cumulative_budget": cumulative_budget,
+            "progressive_schedule_status": "IMPLEMENTATION_ASSUMPTION",
         }
 
     # Sanitize callbacks before training execution
     disable_external_logging_callbacks(model)
 
+    # Determine trainer class
+    if profile == "paper_repro" or train_args.get("scale_aware_loss", False) or (args.model == "amsa" and "amsa_lr0" in train_args):
+        trainer_cls = AMSAReproductionTrainer
+        print(f"[Trainer] Using AMSAReproductionTrainer (differential LR & scale-aware loss enabled).")
+    else:
+        trainer_cls = None
+        print(f"[Trainer] Using standard Ultralytics DetectionTrainer.")
+
     # Execute training
     print(f"\n[Training] Launching {args.model.upper()} training ({train_args['epochs']} epochs)...")
-    train_results = model.train(**train_args)
+    if trainer_cls is not None:
+        train_results = model.train(trainer=trainer_cls, **train_args)
+    else:
+        train_results = model.train(**train_args)
     elapsed = time.time() - start_time
 
     # Collect metrics
     metrics_summary: Dict[str, Any] = {
         "model": args.model,
+        "profile": profile,
         "timestamp": datetime.now().isoformat(),
         "total_params": param_count,
         "elapsed_seconds": round(elapsed, 2),
         "output_dir": str(output_dir.resolve()),
     }
+    if torch.cuda.is_available():
+        metrics_summary["peak_gpu_memory_mb"] = round(torch.cuda.max_memory_allocated() / (1024 ** 2), 2)
+    if hasattr(train_results, "fitness"):
+        metrics_summary["best_fitness"] = float(train_results.fitness)
 
     if hasattr(train_results, "results_dict") and isinstance(train_results.results_dict, dict):
         rd = train_results.results_dict
