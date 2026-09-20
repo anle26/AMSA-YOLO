@@ -15,7 +15,7 @@ import json
 from pathlib import Path
 import sys
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 
 # Ensure project root is on sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -31,6 +31,7 @@ from src.training import (
     disable_external_logging_callbacks,
     find_offline_file,
     get_training_args,
+    resolve_resume_checkpoint,
     resolve_visdrone_dataset,
 )
 
@@ -122,6 +123,18 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Build models and verify weight initialization without starting training.",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        default=False,
+        help="Resume training from previous run checkpoint (runs/visdrone/<model>/weights/last.pt).",
+    )
+    parser.add_argument(
+        "--resume-from",
+        type=str,
+        default=None,
+        help="Explicit path to checkpoint file (e.g. /path/to/last.pt) to resume from.",
+    )
     return parser.parse_args()
 
 
@@ -129,18 +142,32 @@ def setup_model(
     model_type: str,
     weights_path: Optional[str] = None,
     allow_untrained_fallback: bool = False,
+    resume_checkpoint: Optional[Union[str, Path]] = None,
 ) -> YOLO:
     """
     Construct model and initialize weights according to fair benchmark protocol.
 
-    Baseline:
+    Fresh Baseline:
         Constructed from yolov8s.yaml and loads stock pretrained weights.
-    AMSA:
+    Fresh AMSA:
         Constructed from configs/yolov8s-amsa.yaml and transfers stock pretrained
         weights via transfer_yolov8s_weights(), leaving AMSA lateral modules fresh.
+    Resume Run (Baseline or AMSA):
+        Loaded directly from verified checkpoint (e.g. weights/last.pt) preserving
+        all weights, optimizer state, scheduler state, and training epoch counter.
     """
     register_amsa()
     disable_external_logging_callbacks()
+
+    if resume_checkpoint is not None:
+        resolved_ckpt = Path(resume_checkpoint).resolve()
+        if not resolved_ckpt.is_file():
+            raise FileNotFoundError(f"Resume checkpoint does not exist: {resolved_ckpt}")
+        print(f"\n[Setup] Resuming {model_type.upper()} model directly from checkpoint: {resolved_ckpt}")
+        model = YOLO(str(resolved_ckpt))
+        model.ckpt_path = str(resolved_ckpt)
+        disable_external_logging_callbacks(model)
+        return model
 
     # Attempt to locate offline weights file
     resolved_weights: Optional[Path] = None
@@ -214,12 +241,26 @@ def run_benchmark_training(args: argparse.Namespace) -> Dict[str, Any]:
     )
     print(f"[Config] Resolved Dataset YAML: {data_yaml}")
 
+    # Determine run name and check for resume checkpoint
+    run_name = args.name if args.name else (f"smoke_{args.model}" if args.smoke else args.model)
+    resume_checkpoint = resolve_resume_checkpoint(
+        model_type=args.model,
+        resume=args.resume,
+        resume_from=args.resume_from,
+        project=args.project,
+        name=run_name,
+    )
+    is_resuming = resume_checkpoint is not None
+    if is_resuming:
+        print(f"[Resume] Resuming training from checkpoint: {resume_checkpoint}")
+
     # Build model and setup initialization
     allow_fallback = args.smoke or args.dry_run
     model = setup_model(
         model_type=args.model,
         weights_path=args.weights,
         allow_untrained_fallback=allow_fallback,
+        resume_checkpoint=resume_checkpoint,
     )
 
     # Calculate model complexity
@@ -231,7 +272,6 @@ def run_benchmark_training(args: argparse.Namespace) -> Dict[str, Any]:
     # Prepare training arguments
     epochs = 1 if args.smoke else args.epochs
     batch = 2 if (args.smoke and device == "cpu") else (4 if args.smoke else args.batch)
-    run_name = args.name if args.name else (f"smoke_{args.model}" if args.smoke else args.model)
 
     extra_overrides: Dict[str, Any] = {}
     if args.fraction is not None:
@@ -250,6 +290,7 @@ def run_benchmark_training(args: argparse.Namespace) -> Dict[str, Any]:
         device=device,
         workers=args.workers,
         extra_overrides=extra_overrides,
+        resume=is_resuming,
     )
 
     output_dir = Path(args.project) / run_name
@@ -265,6 +306,8 @@ def run_benchmark_training(args: argparse.Namespace) -> Dict[str, Any]:
             "model": args.model,
             "params": param_count,
             "train_args": train_args,
+            "resumed": is_resuming,
+            "resume_checkpoint": str(resume_checkpoint) if resume_checkpoint else None,
         }
 
     # Sanitize callbacks before training execution

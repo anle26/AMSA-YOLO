@@ -73,6 +73,7 @@ def get_training_args(
     device: Optional[Union[int, str]] = None,
     workers: Optional[int] = None,
     extra_overrides: Optional[Dict[str, Any]] = None,
+    resume: bool = False,
 ) -> Dict[str, Any]:
     """
     Generate the training argument dictionary for a benchmark run.
@@ -88,6 +89,7 @@ def get_training_args(
         device: Optional device override (e.g. 0 or 'cpu').
         workers: Optional workers count override.
         extra_overrides: Optional additional hyperparameter overrides.
+        resume: Whether to resume training from an existing checkpoint.
 
     Returns:
         Dict[str, Any]: Complete, verified training argument dictionary.
@@ -114,7 +116,59 @@ def get_training_args(
     if extra_overrides:
         args.update(extra_overrides)
 
+    if resume:
+        args["resume"] = True
+
     return args
+
+
+def resolve_resume_checkpoint(
+    model_type: str,
+    resume: bool = False,
+    resume_from: Optional[Union[str, Path]] = None,
+    project: Union[str, Path] = "runs/visdrone",
+    name: Optional[str] = None,
+) -> Optional[Path]:
+    """
+    Resolve and validate checkpoint path for training resumption.
+
+    Args:
+        model_type: 'baseline' or 'amsa'.
+        resume: If True, automatically looks for <project>/<name>/weights/last.pt.
+        resume_from: Explicit path to checkpoint file.
+        project: Root output directory (default: 'runs/visdrone').
+        name: Experiment run name (defaults to model_type).
+
+    Returns:
+        Optional[Path]: Resolved Path to checkpoint file, or None if fresh run.
+
+    Raises:
+        FileNotFoundError: If resume is requested but checkpoint file does not exist.
+        ValueError: If model_type is invalid.
+    """
+    if model_type not in ("baseline", "amsa"):
+        raise ValueError(f"Invalid model_type '{model_type}'. Must be 'baseline' or 'amsa'.")
+
+    if not resume and not resume_from:
+        return None
+
+    if resume_from:
+        explicit_path = Path(resume_from).resolve()
+        if not explicit_path.is_file():
+            raise FileNotFoundError(
+                f"Explicit resume checkpoint does not exist: {resume_from}"
+            )
+        return explicit_path
+
+    # Automatic resume path: <project>/<name>/weights/last.pt
+    run_name = name if name is not None else model_type
+    auto_path = (Path(project) / run_name / "weights" / "last.pt").resolve()
+    if not auto_path.is_file():
+        raise FileNotFoundError(
+            f"Cannot resume {model_type} training: checkpoint not found at '{auto_path}'.\n"
+            f"Ensure a previous training run generated 'weights/last.pt' or specify an explicit path with --resume-from."
+        )
+    return auto_path
 
 
 def find_offline_file(

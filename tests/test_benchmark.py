@@ -28,6 +28,7 @@ from src.training import (
     get_training_args,
     is_raytune_or_wandb_callback,
     purge_external_callbacks,
+    resolve_resume_checkpoint,
     resolve_visdrone_dataset,
 )
 from ultralytics.utils import SETTINGS
@@ -311,3 +312,182 @@ class TestBenchmarkPipeline:
             "val", "plots", "save", "save_period",
         ):
             assert args_after[key] == DEFAULT_TRAINING_CONFIG[key]
+
+    def test_fresh_baseline_and_amsa_unchanged(self) -> None:
+        """Verify fresh runs without --resume return None for resume checkpoint."""
+        assert resolve_resume_checkpoint("baseline", resume=False, resume_from=None) is None
+        assert resolve_resume_checkpoint("amsa", resume=False, resume_from=None) is None
+
+        # Verify fresh baseline and fresh amsa initialize without error
+        register_amsa()
+        fresh_b = setup_model("baseline", allow_untrained_fallback=True)
+        fresh_a = setup_model("amsa", allow_untrained_fallback=True)
+        assert fresh_b is not None
+        assert fresh_a is not None
+
+    def test_resume_resolves_baseline_and_amsa_last_pt(self, tmp_path: Path) -> None:
+        """Verify --resume automatically resolves runs/visdrone/<model>/weights/last.pt."""
+        b_ckpt_dir = tmp_path / "baseline" / "weights"
+        b_ckpt_dir.mkdir(parents=True)
+        b_last = b_ckpt_dir / "last.pt"
+        b_last.touch()
+
+        a_ckpt_dir = tmp_path / "amsa" / "weights"
+        a_ckpt_dir.mkdir(parents=True)
+        a_last = a_ckpt_dir / "last.pt"
+        a_last.touch()
+
+        resolved_b = resolve_resume_checkpoint("baseline", resume=True, project=tmp_path)
+        resolved_a = resolve_resume_checkpoint("amsa", resume=True, project=tmp_path)
+
+        assert resolved_b == b_last.resolve()
+        assert resolved_a == a_last.resolve()
+
+    def test_resume_from_explicit_path(self, tmp_path: Path) -> None:
+        """Verify --resume-from resolves the exact specified checkpoint path."""
+        custom_dir = tmp_path / "checkpoints"
+        custom_dir.mkdir(parents=True)
+        custom_ckpt = custom_dir / "epoch_150.pt"
+        custom_ckpt.touch()
+
+        resolved = resolve_resume_checkpoint("baseline", resume_from=custom_ckpt)
+        assert resolved == custom_ckpt.resolve()
+
+        # Both flags provided: explicit path takes precedence
+        resolved_both = resolve_resume_checkpoint("amsa", resume=True, resume_from=custom_ckpt)
+        assert resolved_both == custom_ckpt.resolve()
+
+    def test_missing_checkpoint_raises_file_not_found_error(self, tmp_path: Path) -> None:
+        """Verify clear FileNotFoundError when checkpoint does not exist."""
+        # Auto-resume missing checkpoint
+        with pytest.raises(FileNotFoundError, match="Cannot resume baseline training: checkpoint not found at"):
+            resolve_resume_checkpoint("baseline", resume=True, project=tmp_path)
+
+        with pytest.raises(FileNotFoundError, match="Cannot resume amsa training: checkpoint not found at"):
+            resolve_resume_checkpoint("amsa", resume=True, project=tmp_path)
+
+        # Explicit resume missing checkpoint
+        missing_file = tmp_path / "does_not_exist.pt"
+        with pytest.raises(FileNotFoundError, match="Explicit resume checkpoint does not exist"):
+            resolve_resume_checkpoint("baseline", resume_from=missing_file)
+
+    def test_resume_path_does_not_invoke_fresh_pretrained_remapping(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """
+        Verify that resuming AMSA does NOT rebuild from stock yolov8s.pt and does NOT
+        invoke transfer_yolov8s_weights(), loading the saved checkpoint directly.
+        """
+        register_amsa()
+        amsa_model = YOLO("configs/yolov8s-amsa.yaml")
+
+        # Save a valid dummy checkpoint mimicking Ultralytics save format
+        dummy_ckpt = {
+            "epoch": 25,
+            "best_fitness": 0.55,
+            "model": amsa_model.model,
+            "ema": None,
+            "updates": None,
+            "optimizer": {"state": {}, "param_groups": [{"lr": 0.01}]},
+            "train_args": {
+                "model": "configs/yolov8s-amsa.yaml",
+                "data": "configs/visdrone-smoke.yaml",
+                "epochs": 300,
+                "batch": 32,
+                "imgsz": 640,
+            },
+        }
+        ckpt_path = tmp_path / "amsa_last.pt"
+        torch.save(dummy_ckpt, ckpt_path)
+
+        # Spy on transfer_yolov8s_weights to guarantee it is NOT called
+        transfer_called = []
+        import scripts.train_benchmark as tb_module
+        monkeypatch.setattr(
+            tb_module,
+            "transfer_yolov8s_weights",
+            lambda *args, **kwargs: transfer_called.append(True),
+        )
+
+        resumed_model = setup_model("amsa", resume_checkpoint=ckpt_path)
+
+        # Verification: transfer was never invoked
+        assert len(transfer_called) == 0, "transfer_yolov8s_weights must NOT be called on resume runs!"
+        assert resumed_model.ckpt_path == str(ckpt_path.resolve())
+        assert resumed_model.ckpt.get("epoch") == 25
+
+    def test_training_config_parity_with_and_without_resume(self) -> None:
+        """
+        Verify that training configuration parity is strictly maintained across baseline
+        and AMSA models whether running fresh or resuming.
+        """
+        # 1. Fresh runs
+        b_fresh = get_training_args("baseline", "configs/visdrone.yaml", resume=False)
+        a_fresh = get_training_args("amsa", "configs/visdrone.yaml", resume=False)
+        assert "resume" not in b_fresh
+        assert "resume" not in a_fresh
+        for k in set(b_fresh.keys()) - {"name"}:
+            assert b_fresh[k] == a_fresh[k]
+
+        # 2. Resumed runs
+        b_resumed = get_training_args("baseline", "configs/visdrone.yaml", resume=True)
+        a_resumed = get_training_args("amsa", "configs/visdrone.yaml", resume=True)
+        assert b_resumed["resume"] is True
+        assert a_resumed["resume"] is True
+        for k in set(b_resumed.keys()) - {"name"}:
+            assert b_resumed[k] == a_resumed[k]
+
+        # 3. All non-resume hyperparameters remain identical to DEFAULT_TRAINING_CONFIG
+        for key in (
+            "imgsz", "epochs", "batch", "optimizer", "lr0", "lrf",
+            "momentum", "weight_decay", "warmup_epochs", "cos_lr",
+            "amp", "seed", "deterministic", "workers", "mosaic",
+            "val", "plots", "save", "save_period",
+        ):
+            assert b_resumed[key] == DEFAULT_TRAINING_CONFIG[key]
+            assert a_resumed[key] == DEFAULT_TRAINING_CONFIG[key]
+
+    def test_dry_run_with_resume_cli(self, tmp_path: Path) -> None:
+        """Verify dry-run execution with --resume CLI flag."""
+        from scripts.train_benchmark import run_benchmark_training
+        import argparse
+
+        # Create dummy checkpoint
+        ckpt_dir = tmp_path / "baseline" / "weights"
+        ckpt_dir.mkdir(parents=True)
+        ckpt_file = ckpt_dir / "last.pt"
+
+        # Build baseline model and save dummy checkpoint
+        base_model = YOLO("yolov8s.yaml")
+        torch.save({
+            "epoch": 5,
+            "best_fitness": 0.2,
+            "model": base_model.model,
+            "ema": None,
+            "updates": None,
+            "optimizer": {"state": {}, "param_groups": [{"lr": 0.01}]},
+            "train_args": {"model": "yolov8s.yaml", "data": "configs/visdrone-smoke.yaml", "epochs": 300},
+        }, ckpt_file)
+
+        args = argparse.Namespace(
+            model="baseline",
+            weights=None,
+            data="configs/visdrone-smoke.yaml",
+            custom_data_root=None,
+            epochs=300,
+            batch=32,
+            imgsz=640,
+            device="cpu",
+            workers=4,
+            project=str(tmp_path),
+            name="baseline",
+            smoke=False,
+            fraction=None,
+            dry_run=True,
+            resume=True,
+            resume_from=None,
+        )
+
+        res = run_benchmark_training(args)
+        assert res["status"] == "DRY_RUN_PASS"
+        assert res["resumed"] is True
+        assert res["resume_checkpoint"] == str(ckpt_file.resolve())
+        assert res["train_args"]["resume"] is True
