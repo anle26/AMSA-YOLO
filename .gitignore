@@ -50,9 +50,10 @@ checkpoints/
 *.engine
 *.tflite
 
-# Wheelhouse / offline packages (do not track binary wheels)
+# Wheelhouse / offline packages (do not track binary wheels or archive bundles)
 wheelhouse/*.whl
 !wheelhouse/.gitkeep
+amsa-yolo-offline-kaggle.zip
 
 # Logs
 logs/*
