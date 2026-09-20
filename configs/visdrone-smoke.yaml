@@ -1,0 +1,18 @@
+# Miniature VisDrone Smoke Dataset Configuration for CI / Offline Validation
+# Provides 4 train images and 2 val images for fast 1-epoch pipeline smoke tests
+
+path: /home/an/research/AMSA-YOLO/datasets/visdrone_smoke
+train: images/train
+val: images/val
+
+names:
+  0: pedestrian
+  1: people
+  2: bicycle
+  3: car
+  4: van
+  5: truck
+  6: tricycle
+  7: awning-tricycle
+  8: bus
+  9: motor
