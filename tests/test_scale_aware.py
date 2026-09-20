@@ -248,11 +248,10 @@ class TestScaleAwareModule:
 
     def test_dtype_device_contract(self) -> None:
         """
-        Verify the dtype and device contract:
+        Verify device and dtype execution behavior:
         - Module is expected to be moved/cast together with the model (e.g. module.double()).
-        - Output dtype matches input dtype.
-        - Parameters are not silently moved or cast inside forward().
-        - Dtype and device mismatches raise explicit errors.
+        - Device mismatches raise explicit RuntimeError.
+        - Parameters are not silently moved across devices inside forward().
         """
         module = ScaleAwareModule(embed_dim=64)
 
@@ -260,7 +259,6 @@ class TestScaleAwareModule:
         x_f32 = torch.randn(2, 256, 40, 40, dtype=torch.float32, device="cpu")
         out_f32 = module(x_f32, scale_level=4)
         assert out_f32.dtype == torch.float32
-        assert out_f32.dtype == x_f32.dtype
         assert out_f32.device == x_f32.device
 
         # 2. float64 on CPU after calling module.double()
@@ -268,21 +266,117 @@ class TestScaleAwareModule:
         x_f64 = torch.randn(2, 256, 40, 40, dtype=torch.float64, device="cpu")
         out_f64 = module(x_f64, scale_level=4)
         assert out_f64.dtype == torch.float64
-        assert out_f64.dtype == x_f64.dtype
         assert out_f64.device == x_f64.device
 
-        # 3. Dtype mismatch should raise TypeError rather than silently casting
-        module.float()  # Reset module to float32
-        with pytest.raises(TypeError, match="Dtype mismatch"):
-            module(x_f64, scale_level=4)
-
-        # 4. Optional CUDA execution (guarded; not required locally)
+        # 3. Optional CUDA execution and device mismatch verification
         if torch.cuda.is_available():
-            module.cuda()
+            module_cuda = ScaleAwareModule(embed_dim=64).cuda()
             x_cuda = torch.randn(2, 256, 40, 40, device="cuda")
-            out_cuda = module(x_cuda, scale_level=4)
+            out_cuda = module_cuda(x_cuda, scale_level=4)
             assert out_cuda.device.type == "cuda"
             assert out_cuda.dtype == x_cuda.dtype
+
+            # Device mismatch: input on CUDA, module on CPU
+            module_cpu = ScaleAwareModule(embed_dim=64)
+            with pytest.raises(RuntimeError, match="Device mismatch"):
+                module_cpu(x_cuda, scale_level=4)
+
+    # --------------------------------------------------------------------------
+    # I. Automatic Mixed Precision (AMP) / Autocast Compatibility
+    # --------------------------------------------------------------------------
+    def test_autocast_cpu_bfloat16(self) -> None:
+        """
+        Verify ScaleAwareModule execution under CPU bfloat16 autocast.
+        - Module stays float32 master weights.
+        - Input stays float32.
+        - Forward succeeds with valid shape and finite output.
+        - Backward succeeds, active scale embedding and scale_proj receive gradients.
+        """
+        module = ScaleAwareModule(embed_dim=64)
+        assert module.scale_proj.weight.dtype == torch.float32
+
+        x = torch.randn(2, 128, 40, 40, dtype=torch.float32, requires_grad=True)
+
+        with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+            out = module(x, scale_level=4)
+
+        assert out.shape == (2, 64, 40, 40)
+        assert not torch.isnan(out).any()
+        assert not torch.isinf(out).any()
+
+        loss = out.sum()
+        loss.backward()
+
+        embedding_4 = module.get_embedding(4)
+        assert embedding_4.grad is not None
+        assert not torch.isnan(embedding_4.grad).any()
+        assert not torch.isinf(embedding_4.grad).any()
+
+        assert module.scale_proj.weight.grad is not None
+        assert not torch.isnan(module.scale_proj.weight.grad).any()
+        assert not torch.isinf(module.scale_proj.weight.grad).any()
+
+        # Non-active scale embeddings must NOT receive gradient
+        assert module.get_embedding(3).grad is None
+        assert module.get_embedding(5).grad is None
+
+    def test_autocast_cuda_float16(self) -> None:
+        """
+        Verify ScaleAwareModule execution under CUDA float16 autocast.
+        - Cleanly skip if CUDA unavailable.
+        - Module stays float32 master weights.
+        - Input stays float32.
+        - Forward succeeds with finite output.
+        - Backward succeeds, active scale embedding and scale_proj receive gradients.
+        """
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA device not available for float16 autocast test")
+
+        module = ScaleAwareModule(embed_dim=64).cuda()
+        assert module.scale_proj.weight.dtype == torch.float32
+
+        x = torch.randn(2, 128, 40, 40, dtype=torch.float32, device="cuda")
+
+        with torch.autocast(device_type="cuda", dtype=torch.float16):
+            out = module(x, scale_level=4)
+
+        assert out.shape == (2, 64, 40, 40)
+        assert not torch.isnan(out).any()
+        assert not torch.isinf(out).any()
+
+        loss = out.sum()
+        loss.backward()
+
+        embedding_4 = module.get_embedding(4)
+        assert embedding_4.grad is not None
+        assert not torch.isnan(embedding_4.grad).any()
+        assert not torch.isinf(embedding_4.grad).any()
+
+        assert module.scale_proj.weight.grad is not None
+        assert not torch.isnan(module.scale_proj.weight.grad).any()
+        assert not torch.isinf(module.scale_proj.weight.grad).any()
+
+        # Non-active scale embeddings must NOT receive gradient
+        assert module.get_embedding(3).grad is None
+        assert module.get_embedding(5).grad is None
+
+    def test_forward_with_half_precision_activation_input(self) -> None:
+        """
+        Verify ScaleAwareModule handles activation input tensor already in bfloat16
+        (simulating upstream convolutional layers running in AMP).
+        Module parameters remain float32 master weights.
+        """
+        module = ScaleAwareModule(embed_dim=64)
+        assert module.scale_proj.weight.dtype == torch.float32
+
+        x_bf16 = torch.randn(2, 128, 40, 40, dtype=torch.bfloat16)
+
+        with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+            out = module(x_bf16, scale_level=4)
+
+        assert out.shape == (2, 64, 40, 40)
+        assert not torch.isnan(out).any()
+        assert not torch.isinf(out).any()
 
     # --------------------------------------------------------------------------
     # H. State Dict Namespace Hygiene Tests

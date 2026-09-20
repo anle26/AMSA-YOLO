@@ -279,6 +279,53 @@ class TestAMSAModule:
             AMSAModule(channels=0)
         with pytest.raises(ValueError, match="scale_dim must be a positive integer"):
             AMSAModule(channels=32, scale_dim=-1)
+        with pytest.raises(ValueError):
+            AMSAModule(channels=32, scale_level=2)
+        with pytest.raises(ValueError):
+            AMSAModule(channels=32, scale_level="invalid")
+
+    def test_constructor_bound_and_forward_scale_resolution(self) -> None:
+        """Verify scale_level resolution between constructor and forward."""
+        x = torch.randn(2, 32, 16, 16)
+
+        # 1. Constructor-bound scale allows forward call with no scale_level: module(x)
+        module_bound = AMSAModule(channels=32, scale_level=3)
+        out_bound = module_bound(x)
+        assert out_bound.shape == x.shape
+
+        # 2. Old-style explicit forward call works on unbound module: module(x, scale_level=3)
+        module_unbound = AMSAModule(channels=32)
+        out_explicit = module_unbound(x, scale_level=3)
+        assert out_explicit.shape == x.shape
+        # When weights are identical, bound module(x) and unbound module(x, scale_level=3) match
+        module_unbound.load_state_dict(module_bound.state_dict())
+        assert torch.equal(module_bound(x), module_unbound(x, scale_level=3))
+
+        # 3. Forward override: forward scale_level wins over constructor scale_level
+        module_bound_p3 = AMSAModule(channels=32, scale_level=3)
+        module_bound_p4 = AMSAModule(channels=32, scale_level=4)
+        module_bound_p4.load_state_dict(module_bound_p3.state_dict())
+        # Overriding p3 module with scale_level=4 must match p4 module called with default
+        out_override = module_bound_p3(x, scale_level=4)
+        out_p4_default = module_bound_p4(x)
+        assert torch.equal(out_override, out_p4_default)
+
+        # 4. Missing scale level raises ValueError when neither constructor nor forward provides it
+        module_missing = AMSAModule(channels=32)
+        with pytest.raises(ValueError, match="scale_level must be specified"):
+            module_missing(x)
+        with pytest.raises(ValueError, match="scale_level must be specified"):
+            module_missing(x, scale_level=None)
+
+    def test_registration_in_ultralytics(self) -> None:
+        """Verify AMSAModule is registered into ultralytics.nn.tasks and modules."""
+        import ultralytics.nn.tasks as tasks
+        import ultralytics.nn.modules as modules
+        from src.amsa import register_amsa
+        register_amsa()
+        assert getattr(tasks, "AMSAModule", None) is AMSAModule
+        assert getattr(modules, "AMSAModule", None) is AMSAModule
+
 
     # -------------------------------------------------------------------------
     # 15-17. Hardware Contracts, Evaluation Determinism & State Dict

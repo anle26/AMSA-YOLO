@@ -131,9 +131,10 @@ class ScaleAwareModule(nn.Module):
         """
         Forward pass of the Scale-Aware Module.
 
-        The module adheres to strict dtype and device contracts:
-        - Input tensor x and module parameters must reside on the same device and share dtype.
-        - Parameters are not silently moved or cast inside forward().
+        The module adheres to device contracts:
+        - Input tensor x and module parameters must reside on the same device.
+        - Parameters are not silently moved across devices inside forward().
+        - Compatible with PyTorch Automatic Mixed Precision (torch.autocast).
 
         Args:
             x (torch.Tensor): Input feature tensor of shape (B, C, H, W).
@@ -150,15 +151,10 @@ class ScaleAwareModule(nn.Module):
                 f"Expected 4D input tensor with shape (B, C, H, W), got {x.dim()}D tensor with shape {tuple(x.shape)}"
             )
 
-        # Enforce device and dtype contract: module and input must match
+        # Enforce device compatibility: module and input must be on the same device
         if x.device != self.scale_proj.weight.device:
             raise RuntimeError(
                 f"Device mismatch: input tensor is on {x.device}, but {self.__class__.__name__} is on {self.scale_proj.weight.device}"
-            )
-        if x.dtype != self.scale_proj.weight.dtype:
-            raise TypeError(
-                f"Dtype mismatch: input tensor has dtype {x.dtype}, but {self.__class__.__name__} has dtype {self.scale_proj.weight.dtype}. "
-                "Ensure module is cast/moved together with the model (e.g. module.double() or module.to(dtype))."
             )
 
         # Retrieve learnable embedding E_s in R^D (Shape: (D,))

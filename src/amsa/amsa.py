@@ -25,7 +25,7 @@ Architectural Boundaries:
     duplicating, or injecting additional convolutional, normalization, or gating operations.
 """
 
-from typing import Dict, Tuple, Union
+from typing import Dict, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
@@ -45,6 +45,7 @@ class AMSAModule(nn.Module):
 
     Args:
         channels (int): Number of feature channels C in input tensor X.
+        scale_level (Optional[Union[int, str]]): Default pyramid level identifier (3, 4, 5).
         scale_dim (int): Embedding dimension D of scale tensor S. Default: 64.
         spatial_local_reduction (int): Channel reduction for spatial local attention. Default: 4.
         spatial_scale_reduction (int): Dimension reduction for spatial scale MLP. Default: 4.
@@ -58,6 +59,7 @@ class AMSAModule(nn.Module):
     def __init__(
         self,
         channels: int,
+        scale_level: Optional[Union[int, str]] = None,
         scale_dim: int = 64,
         spatial_local_reduction: int = 4,
         spatial_scale_reduction: int = 4,
@@ -81,6 +83,11 @@ class AMSAModule(nn.Module):
         self.scale_aware = ScaleAwareModule(
             embed_dim=scale_dim,
         )
+
+        # Validate and store constructor scale_level if provided
+        if scale_level is not None:
+            self.scale_aware._normalize_scale_level(scale_level)
+        self.scale_level = scale_level
 
         # 2. Adaptive Spatial Attention (Section 3.3)
         self.spatial_attention = AdaptiveSpatialAttention(
@@ -109,27 +116,37 @@ class AMSAModule(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        scale_level: Union[int, str],
+        scale_level: Optional[Union[int, str]] = None,
         return_intermediates: bool = False,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, torch.Tensor]]]:
         """
         Forward pass of AMSAModule.
 
         Pipeline:
-            S = self.scale_aware(x, scale_level)
+            S = self.scale_aware(x, resolved_scale_level)
             X_spatial = self.spatial_attention(x, S)
             X_channel = self.channel_attention(x, S)
             X_output = self.fusion(x, X_channel, X_spatial)
 
         Args:
             x (torch.Tensor): Input feature tensor X of shape (B, C, H, W).
-            scale_level (Union[int, str]): Pyramid level identifier, e.g. 3, 4, 5 or '3', '4', '5'.
+            scale_level (Optional[Union[int, str]]): Pyramid level identifier (3, 4, 5).
+                If provided, overrides constructor scale_level. If neither is provided, raises ValueError.
             return_intermediates (bool): If True, also returns dictionary of intermediate tensors.
 
         Returns:
             torch.Tensor: Calibrated output feature tensor X_output of shape (B, C, H, W).
             (Optional) Dict[str, torch.Tensor]: Intermediates if return_intermediates=True.
         """
+        # Resolution rule:
+        # - explicit forward scale_level wins
+        # - otherwise use constructor scale_level
+        # - raise ValueError if neither exists
+        resolved_scale_level = scale_level if scale_level is not None else self.scale_level
+        if resolved_scale_level is None:
+            raise ValueError(
+                "scale_level must be specified either in AMSAModule constructor or in forward()"
+            )
         # Type validation
         if not isinstance(x, torch.Tensor):
             raise TypeError(f"Expected x to be a torch.Tensor, got {type(x).__name__}")
@@ -147,7 +164,7 @@ class AMSAModule(nn.Module):
             )
 
         # 1. Scale-aware descriptor encoding
-        s = self.scale_aware(x, scale_level)
+        s = self.scale_aware(x, resolved_scale_level)
 
         # 2. Adaptive spatial attention modulation
         x_spatial = self.spatial_attention(x, s)

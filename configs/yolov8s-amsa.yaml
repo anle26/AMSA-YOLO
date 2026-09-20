@@ -1,0 +1,53 @@
+# Ultralytics YOLO 🚀, AGPL-3.0 license
+# YOLOv8s-AMSA model definition with lateral AMSA attention on P3, P4, and P5.
+# Paper Reference:
+#   AMSA-YOLO: Real-time object detection with adaptive multi-scale attention mechanism
+#   Neural Networks, Volume 197, Article 108545 (January 2026).
+
+# Parameters
+nc: 80 # number of classes
+scales:
+  # [depth, width, max_channels]
+  s: [0.33, 0.50, 1024]
+
+# YOLOv8s backbone (main path preserved identically to stock YOLOv8)
+backbone:
+  # [from, repeats, module, args]
+  - [-1, 1, Conv, [64, 3, 2]] # 0-P1/2  -> [B, 32, H/2, W/2]
+  - [-1, 1, Conv, [128, 3, 2]] # 1-P2/4  -> [B, 64, H/4, W/4]
+  - [-1, 3, C2f, [128, True]] # 2       -> [B, 64, H/4, W/4]
+  - [-1, 1, Conv, [256, 3, 2]] # 3-P3/8  -> [B, 128, H/8, W/8]
+  - [-1, 6, C2f, [256, True]] # 4-P3out -> [B, 128, H/8, W/8] (Backbone P3)
+  - [-1, 1, Conv, [512, 3, 2]] # 5-P4/16 -> [B, 256, H/16, W/16] (takes layer 4)
+  - [-1, 6, C2f, [512, True]] # 6-P4out -> [B, 256, H/16, W/16] (Backbone P4)
+  - [-1, 1, Conv, [1024, 3, 2]] # 7-P5/32 -> [B, 512, H/32, W/32] (takes layer 6)
+  - [-1, 3, C2f, [1024, True]] # 8       -> [B, 512, H/32, W/32]
+  - [-1, 1, SPPF, [1024, 5]] # 9-P5out -> [B, 512, H/32, W/32] (Backbone P5)
+
+# YOLOv8s-AMSA head (PAN-FPN neck + Detect head)
+head:
+  # Lateral AMSA attention nodes (calibrating backbone P3, P4, P5 for neck)
+  - [4, 1, AMSAModule, [128, 3]] # 10: AMSA-P3 (from layer 4, C=128, scale=3) -> [B, 128, H/8, W/8]
+  - [6, 1, AMSAModule, [256, 4]] # 11: AMSA-P4 (from layer 6, C=256, scale=4) -> [B, 256, H/16, W/16]
+  - [9, 1, AMSAModule, [512, 5]] # 12: AMSA-P5 (from layer 9, C=512, scale=5) -> [B, 512, H/32, W/32]
+
+  # Top-down pathway
+  - [12, 1, nn.Upsample, [None, 2, "nearest"]] # 13: upsample AMSA-P5 -> [B, 512, H/16, W/16]
+  - [[-1, 11], 1, Concat, [1]] # 14: cat upsampled AMSA-P5 + AMSA-P4 -> [B, 768, H/16, W/16]
+  - [-1, 3, C2f, [512]] # 15: neck P4 intermediate -> [B, 256, H/16, W/16]
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 16: upsample neck P4 -> [B, 256, H/8, W/8]
+  - [[-1, 10], 1, Concat, [1]] # 17: cat upsampled neck P4 + AMSA-P3 -> [B, 384, H/8, W/8]
+  - [-1, 3, C2f, [256]] # 18: neck P3 output -> [B, 128, H/8, W/8]
+
+  # Bottom-up pathway
+  - [-1, 1, Conv, [256, 3, 2]] # 19: downsample neck P3 -> [B, 128, H/16, W/16]
+  - [[-1, 15], 1, Concat, [1]] # 20: cat layer 19 + layer 15 -> [B, 384, H/16, W/16]
+  - [-1, 3, C2f, [512]] # 21: neck P4 output -> [B, 256, H/16, W/16]
+
+  # Detection head
+  - [-1, 1, Conv, [512, 3, 2]] # 22: downsample neck P4 -> [B, 256, H/32, W/32]
+  - [[-1, 12], 1, Concat, [1]] # 23: cat layer 22 + AMSA-P5 -> [B, 768, H/32, W/32]
+  - [-1, 3, C2f, [1024]] # 24: neck P5 output -> [B, 512, H/32, W/32]
+
+  - [[18, 21, 24], 1, Detect, [nc]] # 25: Detect(P3, P4, P5)
