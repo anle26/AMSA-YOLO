@@ -1,4 +1,5 @@
 from src.amsa.scale_aware import ScaleAwareModule
 from src.amsa.spatial_attention import AdaptiveSpatialAttention
+from src.amsa.channel_attention import AdaptiveChannelAttention
 
-__all__ = ["ScaleAwareModule", "AdaptiveSpatialAttention"]
+__all__ = ["ScaleAwareModule", "AdaptiveSpatialAttention", "AdaptiveChannelAttention"]
