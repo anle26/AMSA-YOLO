@@ -31,6 +31,7 @@ from src.training import (
     AMSAReproductionTrainer,
     disable_external_logging_callbacks,
     find_offline_file,
+    get_training_and_reproduction_args,
     get_training_args,
     resolve_resume_checkpoint,
     resolve_visdrone_dataset,
@@ -389,7 +390,7 @@ def run_benchmark_training(args: argparse.Namespace) -> Dict[str, Any]:
     elif args.smoke and "smoke" not in str(data_yaml):
         extra_overrides["fraction"] = 0.01  # Use 1% of full data for fast smoke validation
 
-    train_args = get_training_args(
+    train_args, repro_config = get_training_and_reproduction_args(
         model_type=args.model,
         data_path=data_yaml,
         profile=profile,
@@ -402,6 +403,7 @@ def run_benchmark_training(args: argparse.Namespace) -> Dict[str, Any]:
         workers=args.workers,
         scale_aware_loss=scale_aware,
         initialization=initialization,
+        baseline_weights=baseline_weights,
         stage1_epochs=stage1_ep,
         stage2_epochs=stage2_ep,
         extra_overrides=extra_overrides,
@@ -415,22 +417,42 @@ def run_benchmark_training(args: argparse.Namespace) -> Dict[str, Any]:
         else (str(args.weights) if args.weights else ("scratch" if initialization == "scratch" else "stock yolov8s.pt"))
     )
     base_lr = train_args.get("lr0", 0.01)
-    amsa_lr = train_args.get("amsa_lr0", 0.001) if (args.model == "amsa" and profile == "paper_repro") else "N/A"
     paper_reported_epochs = 300
     cumulative_budget = stage1_ep + stage2_ep
+
+    # Determine trainer description and flags for audit log
+    scale_aware_active = repro_config.get("scale_aware_loss", False)
+    scale_aware_str = "Enabled" if scale_aware_active else "Disabled"
+
+    if args.model == "baseline":
+        model_desc = "YOLOv8s baseline"
+        trainer_desc = "Standard YOLO DetectionTrainer"
+        diff_amsa_lr_str = "N/A"
+        amsa_lr_str = "N/A"
+    else:
+        model_desc = "YOLOv8s + AMSA"
+        trainer_desc = "AMSAReproductionTrainer (differential LR & scale-aware loss enabled)"
+        diff_amsa_lr_str = str(repro_config.get("amsa_lr0", 0.001))
+        amsa_lr_str = str(repro_config.get("amsa_lr0", 0.001))
 
     print("\n" + "=" * 70)
     print("       PROGRESSIVE SCHEDULE & OPTIMIZATION AUDIT       ")
     print("=" * 70)
+    print(f"  - Model:                                     {model_desc}")
+    print(f"  - Trainer:                                   {trainer_desc}")
+    print(f"  - Scale-aware loss:                          {scale_aware_str}")
+    print(f"  - Differential AMSA LR:                      {diff_amsa_lr_str}")
+    print(f"  - Base LR:                                   {base_lr}")
+    if args.model == "amsa":
+        print(f"  - AMSA LR:                                   {amsa_lr_str}")
     print(f"  - Current Run Target Epochs:                 {epochs}")
     print(f"  - Paper-reported epochs:                     {paper_reported_epochs}")
     print(f"  - Baseline stage epochs:                     {stage1_ep}")
-    print(f"  - AMSA fine-tuning epochs:                   {stage2_ep}")
+    if args.model == "amsa":
+        print(f"  - AMSA fine-tuning epochs:                   {stage2_ep}")
     print(f"  - Cumulative implementation training budget: {cumulative_budget}")
     print(f"  - Progressive schedule status:               IMPLEMENTATION_ASSUMPTION")
     print(f"  - Initialization Checkpoint:                 {init_source}")
-    print(f"  - Base LR:                                   {base_lr}")
-    print(f"  - AMSA LR:                                   {amsa_lr}")
     print("=" * 70 + "\n")
 
     output_dir = Path(args.project) / run_name
@@ -439,14 +461,30 @@ def run_benchmark_training(args: argparse.Namespace) -> Dict[str, Any]:
     for k in sorted(train_args.keys()):
         print(f"  - {k}: {train_args[k]}")
 
+    # Determine trainer class (clean baseline uses standard Ultralytics DetectionTrainer)
+    if args.model == "amsa" and (profile == "paper_repro" or repro_config.get("scale_aware_loss", False)):
+        trainer_cls = AMSAReproductionTrainer.with_config(repro_config)
+        trainer_desc = "AMSAReproductionTrainer (differential LR & scale-aware loss enabled)"
+    elif repro_config.get("scale_aware_loss", False):
+        trainer_cls = AMSAReproductionTrainer.with_config(repro_config)
+        trainer_desc = "AMSAReproductionTrainer"
+    else:
+        trainer_cls = None
+        trainer_desc = "Standard Ultralytics DetectionTrainer"
+
+    print(f"\n[Trainer] Selected: {trainer_desc}")
+
     if args.dry_run:
-        print("\n[Dry-Run] Completed dry-run validation. Model and configs verified cleanly.")
+        print("[Dry-Run] Completed dry-run validation. Model and configs verified cleanly.")
         return {
             "status": "DRY_RUN_PASS",
             "model": args.model,
+            "model_obj": model,
             "profile": profile,
             "params": param_count,
             "train_args": train_args,
+            "repro_config": repro_config,
+            "trainer_cls": trainer_cls,
             "resumed": is_resuming,
             "resume_checkpoint": str(resume_checkpoint) if resume_checkpoint else None,
             "stage1_epochs": stage1_ep,
@@ -458,14 +496,6 @@ def run_benchmark_training(args: argparse.Namespace) -> Dict[str, Any]:
 
     # Sanitize callbacks before training execution
     disable_external_logging_callbacks(model)
-
-    # Determine trainer class
-    if profile == "paper_repro" or train_args.get("scale_aware_loss", False) or (args.model == "amsa" and "amsa_lr0" in train_args):
-        trainer_cls = AMSAReproductionTrainer
-        print(f"[Trainer] Using AMSAReproductionTrainer (differential LR & scale-aware loss enabled).")
-    else:
-        trainer_cls = None
-        print(f"[Trainer] Using standard Ultralytics DetectionTrainer.")
 
     # Execute training
     print(f"\n[Training] Launching {args.model.upper()} training ({train_args['epochs']} epochs)...")

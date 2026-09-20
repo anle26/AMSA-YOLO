@@ -10,15 +10,22 @@ Enforces:
 3. Offline execution compliance with zero site-packages patching.
 """
 
-from typing import Dict, List, Set
+from copy import copy, deepcopy
+from typing import Any, Dict, List, Optional, Set
 import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from ultralytics.models.yolo.detect import DetectionTrainer
+from ultralytics.cfg import DEFAULT_CFG
+from ultralytics.models.yolo.detect import DetectionTrainer, DetectionValidator
 from ultralytics.utils import LOGGER, colorstr
 
 from src.amsa.amsa import AMSAModule
+from src.training.config import (
+    REPRODUCTION_CUSTOM_KEYS,
+    REPRODUCTION_RUNTIME_CONFIG,
+    split_training_and_reproduction_args,
+)
 from src.training.loss import ScaleAwareDetectionLoss
 
 
@@ -43,31 +50,72 @@ def identify_amsa_parameter_ids(model: nn.Module) -> Set[int]:
 class AMSAReproductionTrainer(DetectionTrainer):
     """
     Custom DetectionTrainer for paper-faithful AMSA-YOLO reproduction on VisDrone.
+
+    Guarantees:
+    1. Strict separation: custom reproduction parameters are NEVER inserted into self.args
+       or passed to Ultralytics get_cfg/validator, preventing SyntaxError in DetectionValidator.
+    2. Differential Learning Rates:
+       - Base YOLOv8 parameters: lr0 = 0.01 (AdamW)
+       - Newly introduced AMSA parameters: amsa_lr0 = 0.001 (AdamW)
+       - Weight decay: 0.0005 on weights, 0.0 on biases and normalization layers
+    3. Scale-Aware Loss injection (ScaleAwareDetectionLoss) strictly for AMSA when enabled.
     """
 
-    def __init__(self, cfg=None, overrides=None, _callbacks=None):
-        clean_overrides = dict(overrides) if overrides else {}
-        self.amsa_lr0 = float(clean_overrides.pop("amsa_lr0", 0.001))
-        self.scale_aware_loss = bool(clean_overrides.pop("scale_aware_loss", True))
-        self.initialization = clean_overrides.pop("initialization", "pretrained")
-        self.profile = clean_overrides.pop("profile", "paper_repro")
-        self.baseline_weights = clean_overrides.pop("baseline_weights", None)
-        self.stage1_epochs = clean_overrides.pop("stage1_epochs", 300)
-        self.stage2_epochs = clean_overrides.pop("stage2_epochs", 300)
+    default_repro_config: Dict[str, Any] = deepcopy(REPRODUCTION_RUNTIME_CONFIG)
+
+    @classmethod
+    def with_config(cls, repro_config: Optional[Dict[str, Any]] = None):
+        """
+        Factory creating an AMSAReproductionTrainer class with preconfigured repro_config.
+        """
+        class ConfiguredTrainer(cls):
+            pass
+        ConfiguredTrainer.default_repro_config = deepcopy(cls.default_repro_config)
+        if repro_config:
+            ConfiguredTrainer.default_repro_config.update(repro_config)
+        return ConfiguredTrainer
+
+    def __init__(self, cfg=DEFAULT_CFG, overrides=None, _callbacks=None, repro_config=None):
+        raw_overrides = dict(overrides) if overrides else {}
+        clean_overrides, extracted_repro = split_training_and_reproduction_args(raw_overrides)
+
+        cfg_dict = deepcopy(self.default_repro_config)
+        if repro_config:
+            cfg_dict.update(repro_config)
+        cfg_dict.update(extracted_repro)
+
+        # Store all custom runtime state strictly OUTSIDE self.args
+        self.repro_config = cfg_dict
+        self.amsa_lr0 = float(self.repro_config.get("amsa_lr0", 0.001))
+        self.scale_aware_loss_enabled = bool(self.repro_config.get("scale_aware_loss", True))
+        self.initialization = str(self.repro_config.get("initialization", "pretrained"))
+        self.baseline_weights = self.repro_config.get("baseline_weights", None)
+        self.stage1_epochs = int(self.repro_config.get("stage1_epochs", 300))
+        self.stage2_epochs = int(self.repro_config.get("stage2_epochs", 300))
 
         if cfg is None:
-            from ultralytics.cfg import DEFAULT_CFG
             cfg = DEFAULT_CFG
 
         super().__init__(cfg=cfg, overrides=clean_overrides, _callbacks=_callbacks)
-        # Re-attach custom attributes to self.args
-        self.args.amsa_lr0 = self.amsa_lr0
-        self.args.scale_aware_loss = self.scale_aware_loss
-        self.args.initialization = self.initialization
-        self.args.profile = self.profile
-        self.args.baseline_weights = self.baseline_weights
-        self.args.stage1_epochs = self.stage1_epochs
-        self.args.stage2_epochs = self.stage2_epochs
+
+        # CRITICAL: Clean any custom reproduction keys from self.args
+        for k in REPRODUCTION_CUSTOM_KEYS:
+            if hasattr(self.args, k):
+                delattr(self.args, k)
+
+    def get_validator(self):
+        """
+        Returns a DetectionValidator initialized strictly with sanitized Ultralytics args.
+        Guarantees that DetectionValidator will never crash on custom reproduction keys.
+        """
+        clean_args = copy(self.args)
+        for k in REPRODUCTION_CUSTOM_KEYS:
+            if hasattr(clean_args, k):
+                delattr(clean_args, k)
+        self.loss_names = "box_loss", "cls_loss", "dfl_loss"
+        return DetectionValidator(
+            self.test_loader, save_dir=self.save_dir, args=clean_args, _callbacks=self.callbacks
+        )
 
     def build_optimizer(
         self,
@@ -86,7 +134,7 @@ class AMSAReproductionTrainer(DetectionTrainer):
         """
         opt_name = self.args.optimizer if self.args.optimizer else name
         base_lr = float(self.args.lr0)
-        amsa_lr = float(getattr(self.args, "amsa_lr0", 0.001))
+        amsa_lr = float(getattr(self, "amsa_lr0", 0.001))
         weight_decay = float(self.args.weight_decay)
         momentum = float(self.args.momentum)
 
@@ -174,7 +222,7 @@ class AMSAReproductionTrainer(DetectionTrainer):
     def set_model_attributes(self):
         """Set model attributes and inject custom ScaleAwareDetectionLoss if configured."""
         super().set_model_attributes()
-        use_scale_aware = getattr(self.args, "scale_aware_loss", False)
+        use_scale_aware = getattr(self, "scale_aware_loss_enabled", False)
         if use_scale_aware:
             LOGGER.info(f"{colorstr('loss:')} Injecting paper-faithful ScaleAwareDetectionLoss (<32: 2.0, 32..95: 1.5, >=96: 1.0)")
             self.model.criterion = ScaleAwareDetectionLoss(self.model, enabled=True)

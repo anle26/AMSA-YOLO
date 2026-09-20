@@ -10,7 +10,7 @@ Guarantees:
 from copy import deepcopy
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 import yaml
 
 from src.training.callbacks import disable_external_logging_callbacks
@@ -61,7 +61,7 @@ DEFAULT_TRAINING_CONFIG: Dict[str, Any] = {
 }
 BENCHMARK_TRAINING_CONFIG = DEFAULT_TRAINING_CONFIG
 
-# Paper-faithful reproduction training configuration
+# Paper-faithful reproduction training configuration (STRICTLY valid Ultralytics arguments)
 # Reference: Neural Networks, Volume 197 (2026), Article 108545.
 PAPER_REPRO_TRAINING_CONFIG: Dict[str, Any] = {
     # Architecture & input
@@ -71,7 +71,6 @@ PAPER_REPRO_TRAINING_CONFIG: Dict[str, Any] = {
     # Optimization
     "optimizer": "AdamW",          # EXACT_FROM_PAPER
     "lr0": 0.01,                   # EXACT_FROM_PAPER (Base YOLO initial learning rate)
-    "amsa_lr0": 0.001,             # EXACT_FROM_PAPER (AMSA lateral modules fine-tuning learning rate)
     "lrf": 0.01,                   # IMPLEMENTATION_ASSUMPTION (Final lr = 0.01 * 0.01 = 0.0001)
     "momentum": 0.937,             # IMPLEMENTATION_ASSUMPTION (AdamW beta1; default Ultralytics)
     "weight_decay": 0.0005,        # EXACT_FROM_PAPER
@@ -93,14 +92,9 @@ PAPER_REPRO_TRAINING_CONFIG: Dict[str, Any] = {
     "perspective": 0.0,            # IMPLEMENTATION_ASSUMPTION
     "flipud": 0.0,                 # IMPLEMENTATION_ASSUMPTION
     # Loss Configuration
-    "scale_aware_loss": True,      # EXACT_FROM_PAPER / ULTRALYTICS_APPROXIMATION
     "box": 7.5,                    # IMPLEMENTATION_ASSUMPTION
     "cls": 0.5,                    # IMPLEMENTATION_ASSUMPTION
     "dfl": 1.5,                    # IMPLEMENTATION_ASSUMPTION
-    # Strategy & Initialization (IMPLEMENTATION_ASSUMPTION: stage boundary is not disclosed in paper)
-    "stage1_epochs": 300,          # IMPLEMENTATION_ASSUMPTION (Stage 1 baseline training epochs)
-    "stage2_epochs": 300,          # IMPLEMENTATION_ASSUMPTION (Stage 2/3 AMSA fine-tuning epochs)
-    "initialization": "pretrained",# IMPLEMENTATION_ASSUMPTION (Configurable: "pretrained" or "scratch")
     # Precision & Execution
     "amp": True,                   # IMPLEMENTATION_ASSUMPTION
     "seed": 0,                     # IMPLEMENTATION_ASSUMPTION
@@ -114,6 +108,142 @@ PAPER_REPRO_TRAINING_CONFIG: Dict[str, Any] = {
     "exist_ok": True,              # IMPLEMENTATION_ASSUMPTION
     "verbose": True,               # IMPLEMENTATION_ASSUMPTION
 }
+
+# Project-specific reproduction runtime keys (MUST NEVER leak into Ultralytics self.args or get_cfg)
+REPRODUCTION_CUSTOM_KEYS = {
+    "profile",
+    "amsa_lr0",
+    "scale_aware_loss",
+    "initialization",
+    "baseline_weights",
+    "stage1_epochs",
+    "stage2_epochs",
+    "cumulative_budget",
+    "paper_reported_epochs",
+    "progressive_schedule_status",
+}
+
+# Project-specific reproduction runtime defaults
+REPRODUCTION_RUNTIME_CONFIG: Dict[str, Any] = {
+    "profile": "paper_repro",
+    "amsa_lr0": 0.001,
+    "scale_aware_loss": False,     # False for baseline, True for AMSA
+    "initialization": "pretrained",
+    "baseline_weights": None,
+    "stage1_epochs": 300,
+    "stage2_epochs": 300,
+    "paper_reported_epochs": 300,
+    "progressive_schedule_status": "IMPLEMENTATION_ASSUMPTION",
+}
+
+
+def split_training_and_reproduction_args(
+    args_dict: Dict[str, Any],
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    Strictly split an arguments dictionary into:
+    1. ultralytics_train_args: strictly containing ONLY valid Ultralytics YOLO arguments.
+    2. repro_config: containing project-specific reproduction runtime settings.
+
+    Guarantees that custom project keys NEVER leak into Ultralytics DetectionTrainer / DetectionValidator.
+    """
+    ultralytics_train_args: Dict[str, Any] = {}
+    repro_config: Dict[str, Any] = {}
+    for k, v in args_dict.items():
+        if k in REPRODUCTION_CUSTOM_KEYS:
+            repro_config[k] = v
+        else:
+            ultralytics_train_args[k] = v
+    return ultralytics_train_args, repro_config
+
+
+def get_training_and_reproduction_args(
+    model_type: str,
+    data_path: Union[str, Path],
+    profile: str = "benchmark",
+    project: str = "runs/visdrone",
+    name: Optional[str] = None,
+    epochs: Optional[int] = None,
+    batch: Optional[int] = None,
+    imgsz: Optional[int] = None,
+    device: Optional[Union[int, str]] = None,
+    workers: Optional[int] = None,
+    scale_aware_loss: Optional[bool] = None,
+    initialization: Optional[str] = None,
+    baseline_weights: Optional[Union[str, Path]] = None,
+    stage1_epochs: Optional[int] = None,
+    stage2_epochs: Optional[int] = None,
+    extra_overrides: Optional[Dict[str, Any]] = None,
+    resume: bool = False,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    Generate separated (ultralytics_train_args, repro_config) dictionaries.
+
+    Guarantees ultralytics_train_args contains ZERO custom reproduction keys.
+    """
+    if model_type not in ("baseline", "amsa"):
+        raise ValueError(f"Invalid model_type '{model_type}'. Must be 'baseline' or 'amsa'.")
+
+    if profile == "benchmark":
+        base_cfg = DEFAULT_TRAINING_CONFIG
+        default_name = model_type
+    elif profile == "paper_repro":
+        base_cfg = PAPER_REPRO_TRAINING_CONFIG
+        default_name = f"paper_{model_type}"
+    else:
+        raise ValueError(f"Invalid profile '{profile}'. Must be 'benchmark' or 'paper_repro'.")
+
+    u_args = deepcopy(base_cfg)
+    u_args["data"] = str(data_path)
+    u_args["project"] = str(project)
+    u_args["name"] = name if name is not None else default_name
+
+    if epochs is not None:
+        u_args["epochs"] = int(epochs)
+    if batch is not None:
+        u_args["batch"] = int(batch)
+    if imgsz is not None:
+        u_args["imgsz"] = int(imgsz)
+    if device is not None:
+        u_args["device"] = device
+    if workers is not None:
+        u_args["workers"] = int(workers)
+    if resume:
+        u_args["resume"] = True
+
+    # Setup reproduction runtime config
+    repro: Dict[str, Any] = deepcopy(REPRODUCTION_RUNTIME_CONFIG)
+    repro["profile"] = profile
+    repro["model"] = model_type
+
+    # Default: baseline has scale_aware_loss=False; AMSA has scale_aware_loss=True (under paper_repro)
+    if scale_aware_loss is not None:
+        repro["scale_aware_loss"] = bool(scale_aware_loss)
+    elif profile == "paper_repro":
+        repro["scale_aware_loss"] = (model_type == "amsa")
+    else:
+        repro["scale_aware_loss"] = False
+
+    if initialization is not None:
+        repro["initialization"] = str(initialization)
+    if baseline_weights is not None:
+        repro["baseline_weights"] = str(baseline_weights)
+    if stage1_epochs is not None:
+        repro["stage1_epochs"] = int(stage1_epochs)
+    if stage2_epochs is not None:
+        repro["stage2_epochs"] = int(stage2_epochs)
+
+    # Process extra_overrides
+    if extra_overrides:
+        clean_extra, repro_extra = split_training_and_reproduction_args(extra_overrides)
+        u_args.update(clean_extra)
+        repro.update(repro_extra)
+
+    # Final split safeguard: ensure NO custom key ever exists in ultralytics args
+    clean_ultralytics_args, extracted = split_training_and_reproduction_args(u_args)
+    repro.update(extracted)
+
+    return clean_ultralytics_args, repro
 
 
 def get_training_args(
@@ -129,77 +259,54 @@ def get_training_args(
     workers: Optional[int] = None,
     scale_aware_loss: Optional[bool] = None,
     initialization: Optional[str] = None,
+    baseline_weights: Optional[Union[str, Path]] = None,
     stage1_epochs: Optional[int] = None,
     stage2_epochs: Optional[int] = None,
     extra_overrides: Optional[Dict[str, Any]] = None,
     resume: bool = False,
 ) -> Dict[str, Any]:
     """
-    Generate the training argument dictionary for a benchmark or paper reproduction run.
-
-    Args:
-        model_type: 'baseline' or 'amsa'.
-        data_path: Path to dataset YAML configuration.
-        profile: 'benchmark' (default) or 'paper_repro'.
-        project: Root output directory. Default: 'runs/visdrone'.
-        name: Subdirectory name. Defaults to model_type (or 'paper_<model>' for paper_repro).
-        epochs: Optional epoch override.
-        batch: Optional batch size override.
-        imgsz: Optional image size override.
-        device: Optional device override (e.g. 0 or 'cpu').
-        workers: Optional workers count override.
-        scale_aware_loss: Optional override for scale-aware loss.
-        initialization: Optional override ('pretrained' or 'scratch').
-        extra_overrides: Optional additional hyperparameter overrides.
-        resume: Whether to resume training from an existing checkpoint.
-
-    Returns:
-        Dict[str, Any]: Complete, verified training argument dictionary.
+    Generate strictly valid Ultralytics YOLO training arguments.
+    Guarantees no custom reproduction keys exist in the returned dictionary.
     """
-    if model_type not in ("baseline", "amsa"):
-        raise ValueError(f"Invalid model_type '{model_type}'. Must be 'baseline' or 'amsa'.")
+    u_args, _ = get_training_and_reproduction_args(
+        model_type=model_type,
+        data_path=data_path,
+        profile=profile,
+        project=project,
+        name=name,
+        epochs=epochs,
+        batch=batch,
+        imgsz=imgsz,
+        device=device,
+        workers=workers,
+        scale_aware_loss=scale_aware_loss,
+        initialization=initialization,
+        baseline_weights=baseline_weights,
+        stage1_epochs=stage1_epochs,
+        stage2_epochs=stage2_epochs,
+        extra_overrides=extra_overrides,
+        resume=resume,
+    )
+    return u_args
 
-    if profile == "benchmark":
-        base_cfg = DEFAULT_TRAINING_CONFIG
-        default_name = model_type
-    elif profile == "paper_repro":
-        base_cfg = PAPER_REPRO_TRAINING_CONFIG
-        default_name = f"paper_{model_type}"
-    else:
-        raise ValueError(f"Invalid profile '{profile}'. Must be 'benchmark' or 'paper_repro'.")
 
-    args = deepcopy(base_cfg)
-    args["data"] = str(data_path)
-    args["project"] = str(project)
-    args["name"] = name if name is not None else default_name
-    args["profile"] = profile
-
-    if epochs is not None:
-        args["epochs"] = int(epochs)
-    if batch is not None:
-        args["batch"] = int(batch)
-    if imgsz is not None:
-        args["imgsz"] = int(imgsz)
-    if device is not None:
-        args["device"] = device
-    if workers is not None:
-        args["workers"] = int(workers)
-    if scale_aware_loss is not None:
-        args["scale_aware_loss"] = bool(scale_aware_loss)
-    if initialization is not None:
-        args["initialization"] = str(initialization)
-    if stage1_epochs is not None:
-        args["stage1_epochs"] = int(stage1_epochs)
-    if stage2_epochs is not None:
-        args["stage2_epochs"] = int(stage2_epochs)
-
-    if extra_overrides:
-        args.update(extra_overrides)
-
-    if resume:
-        args["resume"] = True
-
-    return args
+def get_reproduction_config(
+    model_type: str,
+    data_path: Union[str, Path] = "configs/visdrone.yaml",
+    profile: str = "paper_repro",
+    **kwargs,
+) -> Dict[str, Any]:
+    """
+    Generate reproduction runtime configuration dictionary.
+    """
+    _, repro = get_training_and_reproduction_args(
+        model_type=model_type,
+        data_path=data_path,
+        profile=profile,
+        **kwargs,
+    )
+    return repro
 
 
 def resolve_resume_checkpoint(

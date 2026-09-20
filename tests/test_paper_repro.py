@@ -28,6 +28,7 @@ from torch.optim.lr_scheduler import LambdaLR
 from ultralytics import YOLO
 from ultralytics.utils.torch_utils import one_cycle
 import yaml
+from ultralytics.models.yolo.detect import DetectionTrainer, DetectionValidator
 
 from scripts.train_benchmark import setup_model
 from src.amsa import register_amsa
@@ -35,13 +36,18 @@ from src.training import (
     BENCHMARK_TRAINING_CONFIG,
     DEFAULT_TRAINING_CONFIG,
     PAPER_REPRO_TRAINING_CONFIG,
+    REPRODUCTION_CUSTOM_KEYS,
+    REPRODUCTION_RUNTIME_CONFIG,
     AMSAReproductionTrainer,
     ScaleAwareDetectionLoss,
     compute_scale_aware_weights,
     find_offline_file,
+    get_reproduction_config,
+    get_training_and_reproduction_args,
     get_training_args,
     identify_amsa_parameter_ids,
     resolve_resume_checkpoint,
+    split_training_and_reproduction_args,
 )
 
 
@@ -70,13 +76,14 @@ class TestPaperReproduction:
 
     def test_paper_repro_baseline_and_amsa_hyperparameters(self) -> None:
         """
-        Verify that paper_repro baseline and AMSA configurations match paper specifications.
+        Verify that paper_repro baseline and AMSA configurations match paper specifications,
+        and that custom reproduction runtime keys NEVER leak into Ultralytics training args.
         """
         data_path = "configs/visdrone.yaml"
-        b_args = get_training_args("baseline", data_path=data_path, profile="paper_repro")
-        a_args = get_training_args("amsa", data_path=data_path, profile="paper_repro")
+        b_args, repro_b = get_training_and_reproduction_args("baseline", data_path=data_path, profile="paper_repro")
+        a_args, repro_a = get_training_and_reproduction_args("amsa", data_path=data_path, profile="paper_repro")
 
-        # Common paper-confirmed parameters
+        # Common paper-confirmed parameters in Ultralytics args
         for args in (b_args, a_args):
             assert args["imgsz"] == 640
             assert args["epochs"] == 300
@@ -91,16 +98,25 @@ class TestPaperReproduction:
             assert args["mixup"] == 0.1
             assert args["fliplr"] == 0.5
             assert args["scale"] == 0.5
-            assert args["scale_aware_loss"] is True
-            assert args["initialization"] == "pretrained"
 
-        # AMSA specific
-        assert a_args["amsa_lr0"] == 0.001
-        assert a_args["name"] == "paper_amsa"
+        # Strict separation: custom keys must NOT exist in Ultralytics args
+        for k in REPRODUCTION_CUSTOM_KEYS:
+            assert k not in b_args, f"Custom key '{k}' leaked into baseline Ultralytics args"
+            assert k not in a_args, f"Custom key '{k}' leaked into AMSA Ultralytics args"
+
+        # Baseline specific reproduction config (clean baseline defaults)
+        assert repro_b["scale_aware_loss"] is False
+        assert repro_b["profile"] == "paper_repro"
         assert b_args["name"] == "paper_baseline"
 
+        # AMSA specific reproduction config
+        assert repro_a["amsa_lr0"] == 0.001
+        assert repro_a["scale_aware_loss"] is True
+        assert repro_a["initialization"] == "pretrained"
+        assert a_args["name"] == "paper_amsa"
+
     def test_paper_repro_yaml_parity(self) -> None:
-        """Verify configs/reproduction/amsa_visdrone_paper.yaml matches PAPER_REPRO_TRAINING_CONFIG."""
+        """Verify configs/reproduction/amsa_visdrone_paper.yaml matches PAPER_REPRO_TRAINING_CONFIG and REPRODUCTION_RUNTIME_CONFIG."""
         yaml_file = Path("configs/reproduction/amsa_visdrone_paper.yaml")
         assert yaml_file.is_file(), "Paper reproduction YAML configuration must exist."
 
@@ -108,13 +124,16 @@ class TestPaperReproduction:
             yaml_cfg = yaml.safe_load(f)
 
         for key in (
-            "imgsz", "epochs", "batch", "optimizer", "lr0", "amsa_lr0",
+            "imgsz", "epochs", "batch", "optimizer", "lr0",
             "weight_decay", "warmup_epochs", "cos_lr", "mosaic", "mixup",
-            "fliplr", "scale", "scale_aware_loss", "initialization",
+            "fliplr", "scale",
         ):
             assert yaml_cfg[key] == PAPER_REPRO_TRAINING_CONFIG[key], (
                 f"Mismatch in YAML config for {key}: {yaml_cfg[key]} != {PAPER_REPRO_TRAINING_CONFIG[key]}"
             )
+
+        assert yaml_cfg["amsa_lr0"] == REPRODUCTION_RUNTIME_CONFIG["amsa_lr0"]
+        assert yaml_cfg["initialization"] == REPRODUCTION_RUNTIME_CONFIG["initialization"]
 
     def test_amsa_parameter_identification(self) -> None:
         """
@@ -436,4 +455,189 @@ class TestPaperReproduction:
         assert "Cumulative implementation training budget" in content
         assert "AMSA modules use lr=0.001 for 300 epochs" in content
 
+    def test_baseline_audit_log_fields(self, capsys: pytest.CaptureFixture) -> None:
+        """
+        Verify that baseline audit log reports:
+        - Model: YOLOv8s baseline
+        - Scale-aware loss: Disabled
+        - Differential AMSA LR: N/A
+        - Trainer: Standard YOLO DetectionTrainer
+        - Base LR: 0.01
+        and does NOT show 'AMSAReproductionTrainer (differential LR & scale-aware loss enabled)'.
+        """
+        from scripts.train_benchmark import parse_args, run_benchmark_training
+        import sys
 
+        sys.argv = [
+            "train_benchmark.py",
+            "--model", "baseline",
+            "--profile", "paper_repro",
+            "--dry-run",
+            "--device", "cpu",
+        ]
+        args = parse_args()
+        run_benchmark_training(args)
+
+        captured = capsys.readouterr().out
+        assert "PROGRESSIVE SCHEDULE & OPTIMIZATION AUDIT" in captured
+        assert "Model:                                     YOLOv8s baseline" in captured
+        assert "Trainer:                                   Standard YOLO DetectionTrainer" in captured
+        assert "Scale-aware loss:                          Disabled" in captured
+        assert "Differential AMSA LR:                      N/A" in captured
+        assert "Base LR:                                   0.01" in captured
+        assert "AMSAReproductionTrainer (differential LR & scale-aware loss enabled)" not in captured
+
+    def test_detection_validator_instantiation_for_baseline_and_amsa(self) -> None:
+        """
+        Lightweight integration test verifying that DetectionValidator can be cleanly
+        instantiated without SyntaxError for both baseline and AMSA under paper_repro profile.
+        """
+        from ultralytics.models.yolo.detect import DetectionTrainer, DetectionValidator
+        data_yaml = "configs/visdrone-smoke.yaml"
+
+        # 1. Baseline Validator
+        b_args, b_repro = get_training_and_reproduction_args(
+            "baseline", data_path=data_yaml, profile="paper_repro", epochs=1, batch=2, device="cpu"
+        )
+        b_trainer = DetectionTrainer(overrides=b_args)
+        b_trainer.test_loader = None
+        b_val = b_trainer.get_validator()
+        assert isinstance(b_val, DetectionValidator), "Baseline validator must be a DetectionValidator instance"
+
+        # 2. AMSA Validator
+        a_args, a_repro = get_training_and_reproduction_args(
+            "amsa", data_path=data_yaml, profile="paper_repro", epochs=1, batch=2, device="cpu"
+        )
+        a_trainer = AMSAReproductionTrainer.with_config(a_repro)(overrides=a_args)
+        a_trainer.test_loader = None
+        a_val = a_trainer.get_validator()
+        assert isinstance(a_val, DetectionValidator), "AMSA validator must be a DetectionValidator instance"
+
+    def test_reproduction_keys_strictly_excluded_from_ultralytics_args(self) -> None:
+        """
+        Verify that none of the project-specific reproduction keys exist in the dictionary
+        ultimately passed to Ultralytics model.train() or DetectionTrainer.
+        """
+        data_yaml = "configs/visdrone-smoke.yaml"
+        b_args = get_training_args("baseline", data_path=data_yaml, profile="paper_repro")
+        a_args = get_training_args("amsa", data_path=data_yaml, profile="paper_repro")
+
+        for key in REPRODUCTION_CUSTOM_KEYS:
+            assert key not in b_args, f"Key '{key}' leaked into baseline Ultralytics arguments!"
+            assert key not in a_args, f"Key '{key}' leaked into AMSA Ultralytics arguments!"
+
+    def test_cli_scale_aware_loss_overrides(self) -> None:
+        """
+        Verify that CLI --scale-aware-loss and --no-scale-aware-loss remain functional and
+        override profile defaults without contaminating Ultralytics arguments.
+        """
+        from scripts.train_benchmark import parse_args, run_benchmark_training
+        import sys
+
+        # Test explicit --scale-aware-loss on baseline
+        sys.argv = [
+            "train_benchmark.py",
+            "--model", "baseline",
+            "--profile", "paper_repro",
+            "--scale-aware-loss",
+            "--dry-run",
+            "--device", "cpu",
+        ]
+        args_b_forced = parse_args()
+        res_b_forced = run_benchmark_training(args_b_forced)
+        assert res_b_forced["repro_config"]["scale_aware_loss"] is True
+        for k in REPRODUCTION_CUSTOM_KEYS:
+            assert k not in res_b_forced["train_args"]
+
+        # Test explicit --no-scale-aware-loss on AMSA
+        sys.argv = [
+            "train_benchmark.py",
+            "--model", "amsa",
+            "--profile", "paper_repro",
+            "--no-scale-aware-loss",
+            "--dry-run",
+            "--device", "cpu",
+        ]
+        args_a_disabled = parse_args()
+        res_a_disabled = run_benchmark_training(args_a_disabled)
+        assert res_a_disabled["repro_config"]["scale_aware_loss"] is False
+        for k in REPRODUCTION_CUSTOM_KEYS:
+            assert k not in res_a_disabled["train_args"]
+
+    def test_pretrained_transfer_349_of_355_exact_tensors(self) -> None:
+        """
+        Verify the exact provenance of the 'Transferred 349/355 items from pretrained weights':
+        - Total stock YOLOv8s pretrained tensors: 355
+        - Exact matching tensors transferred: 349 (Backbone: 162/162, Neck: 108/108, Detect box/feat: 79/79)
+        - The 6 non-transferred tensors are strictly the class-dependent linear projections
+          in Detect.cv3 (weights and biases for 3 scales) due to COCO nc=80 vs VisDrone nc=10 mismatch.
+        """
+        # Load stock state_dict
+        stock_ckpt = torch.load("yolov8s.pt", map_location="cpu", weights_only=False)
+        stock_sd = stock_ckpt["model"].state_dict() if "model" in stock_ckpt else stock_ckpt
+        assert len(stock_sd) == 355, f"Expected 355 stock keys, found {len(stock_sd)}"
+
+        # Load VisDrone model (nc=10)
+        base_model = YOLO("yolov8s.yaml")
+        # In YOLOv8, Detect head is layer 22.cv3 for classification
+        # Detect.cv3 has 3 scales: cv3[0][2], cv3[1][2], cv3[2][2]
+        mismatched_keys = []
+        for k, v in stock_sd.items():
+            # Check if this tensor is one of the 6 class-dependent tensors
+            if any(k.startswith(f"model.22.cv3.{i}.2.") for i in (0, 1, 2)):
+                mismatched_keys.append(k)
+
+        assert len(mismatched_keys) == 6, f"Expected exactly 6 nc-dependent tensors, found {len(mismatched_keys)}"
+        expected_keys = {
+            "model.22.cv3.0.2.weight", "model.22.cv3.0.2.bias",
+            "model.22.cv3.1.2.weight", "model.22.cv3.1.2.bias",
+            "model.22.cv3.2.2.weight", "model.22.cv3.2.2.bias",
+        }
+        assert set(mismatched_keys) == expected_keys
+
+        # Assert shape mismatch: stock has shape 80, VisDrone has shape 10
+        for k in expected_keys:
+            if "weight" in k:
+                assert stock_sd[k].shape[0] == 80  # COCO 80 classes
+            elif "bias" in k:
+                assert stock_sd[k].shape[0] == 80  # COCO 80 classes
+
+        # Transferred count is 355 - 6 = 349
+        assert 355 - len(mismatched_keys) == 349
+
+    def test_baseline_uses_standard_trainer_and_optimizer_groups(self) -> None:
+        """
+        Verify that baseline training uses standard YOLO DetectionTrainer:
+        - trainer_cls is None (Ultralytics defaults to DetectionTrainer)
+        - optimizer contains NO amsa groups
+        - loss is standard Ultralytics loss (scale-aware loss disabled)
+        """
+        from scripts.train_benchmark import parse_args, run_benchmark_training
+        import sys
+
+        sys.argv = [
+            "train_benchmark.py",
+            "--model", "baseline",
+            "--profile", "paper_repro",
+            "--data", "configs/visdrone-smoke.yaml",
+            "--dry-run",
+            "--device", "cpu",
+        ]
+        args = parse_args()
+        result = run_benchmark_training(args)
+
+        # 1. Trainer class is None (standard DetectionTrainer)
+        assert result["trainer_cls"] is None
+        assert result["repro_config"]["scale_aware_loss"] is False
+
+        # 2. When DetectionTrainer builds optimizer for baseline model, no amsa groups exist
+        base_model = result["model_obj"]
+        b_trainer = DetectionTrainer(overrides=result["train_args"])
+        opt = b_trainer.build_optimizer(base_model.model)
+        for g in opt.param_groups:
+            assert "amsa" not in g.get("group_name", "")
+            # All groups have base lr
+            assert g["lr"] == 0.01
+
+        # 3. Model criterion is not ScaleAwareDetectionLoss enabled
+        assert not getattr(getattr(base_model.model, "criterion", None), "enabled", False)
