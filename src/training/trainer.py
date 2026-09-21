@@ -22,6 +22,7 @@ from ultralytics.utils import LOGGER, colorstr
 
 from src.amsa.amsa import AMSAModule
 from src.training.config import (
+    NON_TRAINING_CFG_KEYS,
     REPRODUCTION_CUSTOM_KEYS,
     REPRODUCTION_RUNTIME_CONFIG,
     split_training_and_reproduction_args,
@@ -98,18 +99,18 @@ class AMSAReproductionTrainer(DetectionTrainer):
 
         super().__init__(cfg=cfg, overrides=clean_overrides, _callbacks=_callbacks)
 
-        # CRITICAL: Clean any custom reproduction keys from self.args
-        for k in REPRODUCTION_CUSTOM_KEYS:
+        # CRITICAL: Clean any custom reproduction keys or model-construction parameters from self.args
+        for k in NON_TRAINING_CFG_KEYS:
             if hasattr(self.args, k):
                 delattr(self.args, k)
 
     def get_validator(self):
         """
         Returns a DetectionValidator initialized strictly with sanitized Ultralytics args.
-        Guarantees that DetectionValidator will never crash on custom reproduction keys.
+        Guarantees that DetectionValidator will never crash on custom reproduction keys or construction args.
         """
         clean_args = copy(self.args)
-        for k in REPRODUCTION_CUSTOM_KEYS:
+        for k in NON_TRAINING_CFG_KEYS:
             if hasattr(clean_args, k):
                 delattr(clean_args, k)
         self.loss_names = "box_loss", "cls_loss", "dfl_loss"

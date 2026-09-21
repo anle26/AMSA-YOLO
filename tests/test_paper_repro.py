@@ -29,12 +29,15 @@ from ultralytics import YOLO
 from ultralytics.utils.torch_utils import one_cycle
 import yaml
 from ultralytics.models.yolo.detect import DetectionTrainer, DetectionValidator
+from ultralytics.nn.tasks import DetectionModel, yaml_model_load
 
 from scripts.train_benchmark import setup_model
-from src.amsa import register_amsa
+from src.amsa import detect_checkpoint_nc, register_amsa
 from src.training import (
     BENCHMARK_TRAINING_CONFIG,
     DEFAULT_TRAINING_CONFIG,
+    MODEL_CONSTRUCTION_ONLY_KEYS,
+    NON_TRAINING_CFG_KEYS,
     PAPER_REPRO_TRAINING_CONFIG,
     REPRODUCTION_CUSTOM_KEYS,
     REPRODUCTION_RUNTIME_CONFIG,
@@ -284,27 +287,124 @@ class TestPaperReproduction:
 
     def test_progressive_weight_transfer_from_baseline(self, tmp_path: Path) -> None:
         """
-        Verify that progressive Stage 2 initializes AMSA model using trained Stage 1 baseline
-        weights, transferring 355 keys and protecting 84 fresh AMSA parameters.
+        Verify that progressive Stage 2 initializes AMSA model using trained Stage 1 VisDrone
+        baseline weights (nc=10), transferring all 355 stock keys (including 85 Detect head keys
+        and the 6 classification tensors) with 0 shape mismatches and 84 fresh AMSA parameters.
         """
         register_amsa()
-        base_model = YOLO("yolov8s.yaml")
+        b_cfg = yaml_model_load("yolov8s.yaml")
+        b_cfg["nc"] = 10
+        base_det = DetectionModel(b_cfg, nc=10, verbose=False)
+        base_det.yaml["nc"] = 10
 
-        # Save simulated Stage 1 baseline checkpoint
+        # Save simulated Stage 1 VisDrone baseline checkpoint (nc=10)
         stage1_ckpt_path = tmp_path / "baseline_best.pt"
-        torch.save({"model": base_model.model, "epoch": 300, "best_fitness": 0.285}, stage1_ckpt_path)
+        torch.save({"model": base_det, "epoch": 300, "best_fitness": 0.285}, stage1_ckpt_path)
+
+        # Check detect_checkpoint_nc correctly identifies nc=10
+        assert detect_checkpoint_nc(stage1_ckpt_path) == 10
 
         # Initialize AMSA with progressive baseline weights
         amsa_model = setup_model("amsa", baseline_weights=stage1_ckpt_path)
 
         assert amsa_model.ckpt is not None
         assert "model" in amsa_model.ckpt
+        assert amsa_model.model.yaml["nc"] == 10
+        assert amsa_model.model.model[25].nc == 10
 
-        # Check weight equality on Layer 0
+        # Check weight equality on Layer 0 (Backbone)
         assert torch.equal(
-            base_model.model.model[0].conv.weight,
+            base_det.model[0].conv.weight,
             amsa_model.model.model[0].conv.weight,
         )
+
+        # Check weight equality on Layer 22 (baseline Detect) -> Layer 25 (AMSA Detect)
+        for i in (0, 1, 2):
+            assert torch.equal(
+                base_det.model[22].cv3[i][2].weight,
+                amsa_model.model.model[25].cv3[i][2].weight,
+            ), f"Classification weight mismatch at scale {i}"
+            assert torch.equal(
+                base_det.model[22].cv3[i][2].bias,
+                amsa_model.model.model[25].cv3[i][2].bias,
+            ), f"Classification bias mismatch at scale {i}"
+
+    def test_progressive_transfer_sentinel_values_survive_into_trainer(self, tmp_path: Path) -> None:
+        """
+        Regression test: Assign known sentinel values to the 6 VisDrone baseline classification
+        tensors and verify those exact values survive into the AMSA model and through
+        DetectionTrainer.get_model() immediately before training.
+        """
+        register_amsa()
+        b_cfg = yaml_model_load("yolov8s.yaml")
+        b_cfg["nc"] = 10
+        base_det = DetectionModel(b_cfg, nc=10, verbose=False)
+        base_det.yaml["nc"] = 10
+
+        # Assign unique sentinel values to all 6 classification tensors
+        sentinel_map = {
+            "cv3.0.w": 101.5, "cv3.0.b": 102.5,
+            "cv3.1.w": 103.5, "cv3.1.b": 104.5,
+            "cv3.2.w": 105.5, "cv3.2.b": 106.5,
+        }
+        base_det.model[22].cv3[0][2].weight.data.fill_(sentinel_map["cv3.0.w"])
+        base_det.model[22].cv3[0][2].bias.data.fill_(sentinel_map["cv3.0.b"])
+        base_det.model[22].cv3[1][2].weight.data.fill_(sentinel_map["cv3.1.w"])
+        base_det.model[22].cv3[1][2].bias.data.fill_(sentinel_map["cv3.1.b"])
+        base_det.model[22].cv3[2][2].weight.data.fill_(sentinel_map["cv3.2.w"])
+        base_det.model[22].cv3[2][2].bias.data.fill_(sentinel_map["cv3.2.b"])
+
+        sentinel_ckpt_path = tmp_path / "baseline_sentinel.pt"
+        torch.save({"model": base_det, "epoch": 300}, sentinel_ckpt_path)
+
+        # Initialize AMSA using setup_model
+        amsa_model = setup_model("amsa", baseline_weights=sentinel_ckpt_path)
+
+        # 1. Verify sentinels exist in AMSA model immediately after setup
+        assert torch.all(amsa_model.model.model[25].cv3[0][2].weight == sentinel_map["cv3.0.w"])
+        assert torch.all(amsa_model.model.model[25].cv3[0][2].bias == sentinel_map["cv3.0.b"])
+        assert torch.all(amsa_model.model.model[25].cv3[1][2].weight == sentinel_map["cv3.1.w"])
+        assert torch.all(amsa_model.model.model[25].cv3[1][2].bias == sentinel_map["cv3.1.b"])
+        assert torch.all(amsa_model.model.model[25].cv3[2][2].weight == sentinel_map["cv3.2.w"])
+        assert torch.all(amsa_model.model.model[25].cv3[2][2].bias == sentinel_map["cv3.2.b"])
+
+        # 2. Simulate DetectionTrainer model rebuilding during model.train()
+        trainer = DetectionTrainer(overrides={"data": "configs/visdrone-smoke.yaml", "device": "cpu"})
+        rebuilt_model = trainer.get_model(
+            weights=amsa_model.model if amsa_model.ckpt else None,
+            cfg=amsa_model.model.yaml,
+        )
+
+        # Verify sentinels survived into the trainer's actual execution model
+        assert torch.all(rebuilt_model.model[25].cv3[0][2].weight == sentinel_map["cv3.0.w"])
+        assert torch.all(rebuilt_model.model[25].cv3[0][2].bias == sentinel_map["cv3.0.b"])
+        assert torch.all(rebuilt_model.model[25].cv3[1][2].weight == sentinel_map["cv3.1.w"])
+        assert torch.all(rebuilt_model.model[25].cv3[1][2].bias == sentinel_map["cv3.1.b"])
+        assert torch.all(rebuilt_model.model[25].cv3[2][2].weight == sentinel_map["cv3.2.w"])
+        assert torch.all(rebuilt_model.model[25].cv3[2][2].bias == sentinel_map["cv3.2.b"])
+
+    def test_detect_checkpoint_nc_utility(self, tmp_path: Path) -> None:
+        """Verify detect_checkpoint_nc across different checkpoint structures."""
+        # 1. Stock yolov8s.pt
+        assert detect_checkpoint_nc("yolov8s.pt") == 80
+
+        # 2. VisDrone DetectionModel (nc=10)
+        b_cfg = yaml_model_load("yolov8s.yaml")
+        b_cfg["nc"] = 10
+        base_det = DetectionModel(b_cfg, nc=10, verbose=False)
+        assert detect_checkpoint_nc(base_det) == 10
+
+        # 3. State dict with 22.cv3.0.2.weight
+        sd = base_det.state_dict()
+        assert detect_checkpoint_nc(sd) == 10
+
+        # 4. Saved dict with model
+        p = tmp_path / "mock.pt"
+        torch.save({"model": base_det}, p)
+        assert detect_checkpoint_nc(p) == 10
+
+        # 5. Non-existent file
+        assert detect_checkpoint_nc("non_existent.pt") is None
 
     def test_scratch_initialization_policy(self) -> None:
         """Verify that initialization='scratch' creates models without loading pretrained weights."""
@@ -515,14 +615,14 @@ class TestPaperReproduction:
 
     def test_reproduction_keys_strictly_excluded_from_ultralytics_args(self) -> None:
         """
-        Verify that none of the project-specific reproduction keys exist in the dictionary
-        ultimately passed to Ultralytics model.train() or DetectionTrainer.
+        Verify that none of the project-specific reproduction keys or model-construction parameters
+        (like 'nc') exist in the dictionary ultimately passed to Ultralytics model.train() or DetectionTrainer.
         """
         data_yaml = "configs/visdrone-smoke.yaml"
         b_args = get_training_args("baseline", data_path=data_yaml, profile="paper_repro")
         a_args = get_training_args("amsa", data_path=data_yaml, profile="paper_repro")
 
-        for key in REPRODUCTION_CUSTOM_KEYS:
+        for key in NON_TRAINING_CFG_KEYS:
             assert key not in b_args, f"Key '{key}' leaked into baseline Ultralytics arguments!"
             assert key not in a_args, f"Key '{key}' leaked into AMSA Ultralytics arguments!"
 
@@ -641,3 +741,91 @@ class TestPaperReproduction:
 
         # 3. Model criterion is not ScaleAwareDetectionLoss enabled
         assert not getattr(getattr(base_model.model, "criterion", None), "enabled", False)
+
+    def test_nc_strictly_excluded_from_trainer_overrides_and_trainer_args(self, tmp_path: Path) -> None:
+        """
+        Regression test for Kaggle AMSA smoke runtime:
+        Verify that 'nc' is used strictly for model construction and NEVER leaks into:
+        - model.train(**train_args)
+        - AMSAReproductionTrainer overrides
+        - AMSAReproductionTrainer.args (self.args)
+        - DetectionValidator args
+
+        And verify that removing 'nc' from overrides does NOT cause the trainer to rebuild
+        an nc=80 model: the rebuilt model inside trainer must strictly preserve nc=10!
+        """
+        register_amsa()
+
+        # 1. Create simulated VisDrone baseline checkpoint (nc=10)
+        b_cfg = yaml_model_load("yolov8s.yaml")
+        b_cfg["nc"] = 10
+        base_det = DetectionModel(b_cfg, nc=10, verbose=False)
+        base_det.yaml["nc"] = 10
+
+        sentinel_val = 88.88
+        for i in (0, 1, 2):
+            base_det.model[22].cv3[i][2].weight.data.fill_(sentinel_val + i)
+            base_det.model[22].cv3[i][2].bias.data.fill_(sentinel_val + i + 0.5)
+
+        ckpt_path = tmp_path / "baseline_best.pt"
+        torch.save({"model": base_det, "epoch": 300}, ckpt_path)
+
+        # 2. Setup AMSA model using setup_model
+        amsa_model = setup_model("amsa", baseline_weights=ckpt_path)
+
+        # Confirm 'nc' is NOT in amsa_model.overrides
+        assert "nc" not in getattr(amsa_model, "overrides", {})
+
+        # Confirm target model was built with nc=10
+        assert amsa_model.model.yaml["nc"] == 10
+        assert amsa_model.model.model[25].nc == 10
+
+        # 3. Obtain training args and reproduction config
+        train_args, repro_config = get_training_and_reproduction_args(
+            "amsa",
+            data_path="configs/visdrone-smoke.yaml",
+            profile="paper_repro",
+            epochs=1,
+            batch=2,
+            device="cpu",
+        )
+
+        # Assert 'nc' is strictly absent from train_args
+        assert "nc" not in train_args
+        assert "nc" not in repro_config
+
+        # 4. Simulate the exact override dictionary that Model.train() constructs:
+        # args = {**self.overrides, **custom, **kwargs, "mode": "train"}
+        merged_overrides = {**amsa_model.overrides, **train_args, "mode": "train"}
+        assert "nc" not in merged_overrides
+
+        # 5. Initialize AMSAReproductionTrainer directly with these overrides
+        # Must not raise SyntaxError: 'nc' is not a valid YOLO argument
+        trainer_cls = AMSAReproductionTrainer.with_config(repro_config)
+        trainer = trainer_cls(overrides=merged_overrides)
+
+        # Confirm 'nc' is absent from trainer.args (self.args)
+        assert not hasattr(trainer.args, "nc")
+        assert "nc" not in trainer.args.__dict__
+
+        # 6. Verify that model inside trainer still has nc=10
+        rebuilt_model = trainer.get_model(
+            weights=amsa_model.model if amsa_model.ckpt else None,
+            cfg=amsa_model.model.yaml,
+        )
+        assert rebuilt_model.yaml["nc"] == 10
+        assert rebuilt_model.model[25].nc == 10
+        assert rebuilt_model.model[25].cv3[0][2].weight.shape[0] == 10
+        assert rebuilt_model.model[25].cv3[0][2].bias.shape[0] == 10
+
+        # 7. Verify all sentinel values survived completely into the trainer's model
+        for i in (0, 1, 2):
+            assert torch.all(rebuilt_model.model[25].cv3[i][2].weight == sentinel_val + i)
+            assert torch.all(rebuilt_model.model[25].cv3[i][2].bias == sentinel_val + i + 0.5)
+
+        # 8. Verify DetectionValidator can be instantiated cleanly without 'nc'
+        trainer.test_loader = None
+        validator = trainer.get_validator()
+        assert isinstance(validator, DetectionValidator)
+        assert not hasattr(validator.args, "nc")
+

@@ -6,6 +6,8 @@ from src.training.callbacks import (
 from src.training.config import (
     BENCHMARK_TRAINING_CONFIG,
     DEFAULT_TRAINING_CONFIG,
+    MODEL_CONSTRUCTION_ONLY_KEYS,
+    NON_TRAINING_CFG_KEYS,
     PAPER_REPRO_TRAINING_CONFIG,
     REPRODUCTION_CUSTOM_KEYS,
     REPRODUCTION_RUNTIME_CONFIG,
@@ -47,5 +49,7 @@ __all__ = [
     "ScaleAwareBboxLoss",
     "ScaleAwareDetectionLoss",
     "AMSAReproductionTrainer",
+    "MODEL_CONSTRUCTION_ONLY_KEYS",
+    "NON_TRAINING_CFG_KEYS",
     "identify_amsa_parameter_ids",
 ]

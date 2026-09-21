@@ -5,6 +5,7 @@ from src.amsa.fusion import FeatureFusion
 from src.amsa.amsa import AMSAModule
 from src.amsa.pretrained import (
     WeightTransferReport,
+    detect_checkpoint_nc,
     remap_yolov8s_key,
     transfer_yolov8s_weights,
 )
@@ -41,6 +42,7 @@ __all__ = [
     "FeatureFusion",
     "AMSAModule",
     "WeightTransferReport",
+    "detect_checkpoint_nc",
     "remap_yolov8s_key",
     "transfer_yolov8s_weights",
     "register_amsa",

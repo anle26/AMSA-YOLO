@@ -26,9 +26,11 @@ import torch
 from ultralytics import YOLO
 
 from src.amsa import register_amsa
-from src.amsa.pretrained import transfer_yolov8s_weights
+from src.amsa.pretrained import detect_checkpoint_nc, transfer_yolov8s_weights
+from ultralytics.nn.tasks import DetectionModel, yaml_model_load
 from src.training import (
     AMSAReproductionTrainer,
+    NON_TRAINING_CFG_KEYS,
     disable_external_logging_callbacks,
     find_offline_file,
     get_training_and_reproduction_args,
@@ -191,6 +193,8 @@ def setup_model(
     resume_checkpoint: Optional[Union[str, Path]] = None,
     baseline_weights: Optional[Union[str, Path]] = None,
     initialization: str = "pretrained",
+    nc: Optional[int] = None,
+    data: Optional[Union[str, Path, Dict[str, Any]]] = None,
 ) -> YOLO:
     """
     Construct model and initialize weights according to benchmark or paper reproduction protocol.
@@ -245,7 +249,7 @@ def setup_model(
         model = YOLO("yolov8s.yaml")
         if resolved_weights is not None:
             print(f"[Setup] Loading pretrained weights into Baseline from: {resolved_weights}")
-            ckpt = torch.load(resolved_weights, map_location="cpu")
+            ckpt = torch.load(resolved_weights, map_location="cpu", weights_only=False)
             weights_sd = ckpt["model"].state_dict() if isinstance(ckpt, dict) and "model" in ckpt else ckpt
             model.model.load_state_dict(weights_sd, strict=False)
             print("[Setup] Baseline model loaded with stock pretrained weights.")
@@ -261,7 +265,30 @@ def setup_model(
             if not b_path.is_file():
                 raise FileNotFoundError(f"Specified baseline weights do not exist: {baseline_weights}")
             print(f"[Setup] Progressive Training: Transferring trained baseline weights into AMSA from: {b_path}")
-            ckpt = torch.load(b_path, map_location="cpu")
+            ckpt = torch.load(b_path, map_location="cpu", weights_only=False)
+
+            # Detect target class count (nc) from baseline checkpoint, argument, or dataset
+            target_nc = nc or detect_checkpoint_nc(ckpt)
+            if target_nc is None and data is not None:
+                try:
+                    import yaml
+                    d_path = Path(data).resolve()
+                    if d_path.is_file():
+                        with open(d_path, "r") as f:
+                            d_dict = yaml.safe_load(f)
+                            if isinstance(d_dict, dict) and "nc" in d_dict:
+                                target_nc = int(d_dict["nc"])
+                except Exception:
+                    pass
+
+            if target_nc is not None and target_nc != 80:
+                print(f"[Setup] Configuring AMSA target model with nc={target_nc} before progressive weight transfer...")
+                cfg_dict = yaml_model_load("configs/yolov8s-amsa.yaml")
+                cfg_dict["nc"] = target_nc
+                model.model = DetectionModel(cfg_dict, nc=target_nc, verbose=False)
+                model.model.yaml["nc"] = target_nc
+                # NOTE: 'nc' is used strictly for model construction; it must NEVER be added to model.overrides
+
             report = transfer_yolov8s_weights(model, ckpt, strict_dtype=False)
             print(report.summary())
             assert report.total_transferred > 0, "Progressive weight transfer failed: zero keys transferred."
@@ -284,6 +311,11 @@ def setup_model(
             print(report.summary())
             print(f"[Setup] Transferred {report.total_transferred} keys from reference stock architecture.")
         model.ckpt = {"model": model.model}
+
+    # Defensively purge any non-training cfg keys or model construction params from model.overrides
+    if hasattr(model, "overrides") and isinstance(model.overrides, dict):
+        for k in NON_TRAINING_CFG_KEYS:
+            model.overrides.pop(k, None)
 
     disable_external_logging_callbacks(model)
     return model
@@ -361,6 +393,7 @@ def run_benchmark_training(args: argparse.Namespace) -> Dict[str, Any]:
         resume_checkpoint=resume_checkpoint,
         baseline_weights=baseline_weights,
         initialization=initialization,
+        data=data_yaml,
     )
 
     # Calculate model complexity
@@ -496,6 +529,13 @@ def run_benchmark_training(args: argparse.Namespace) -> Dict[str, Any]:
 
     # Sanitize callbacks before training execution
     disable_external_logging_callbacks(model)
+
+    # Defensively purge any non-training cfg keys from train_args and model.overrides
+    for k in NON_TRAINING_CFG_KEYS:
+        train_args.pop(k, None)
+    if hasattr(model, "overrides") and isinstance(model.overrides, dict):
+        for k in NON_TRAINING_CFG_KEYS:
+            model.overrides.pop(k, None)
 
     # Execute training
     print(f"\n[Training] Launching {args.model.upper()} training ({train_args['epochs']} epochs)...")

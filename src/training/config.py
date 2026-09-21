@@ -109,6 +109,12 @@ PAPER_REPRO_TRAINING_CONFIG: Dict[str, Any] = {
     "verbose": True,               # IMPLEMENTATION_ASSUMPTION
 }
 
+# Model construction parameters (valid for Model/DetectionModel instantiation, but invalid in Ultralytics training cfg/overrides)
+MODEL_CONSTRUCTION_ONLY_KEYS = {
+    "nc",
+    "ch",
+}
+
 # Project-specific reproduction runtime keys (MUST NEVER leak into Ultralytics self.args or get_cfg)
 REPRODUCTION_CUSTOM_KEYS = {
     "profile",
@@ -122,6 +128,9 @@ REPRODUCTION_CUSTOM_KEYS = {
     "paper_reported_epochs",
     "progressive_schedule_status",
 }
+
+# Combined set of non-training configuration keys that must be strictly sanitized from trainer overrides
+NON_TRAINING_CFG_KEYS = REPRODUCTION_CUSTOM_KEYS | MODEL_CONSTRUCTION_ONLY_KEYS
 
 # Project-specific reproduction runtime defaults
 REPRODUCTION_RUNTIME_CONFIG: Dict[str, Any] = {
@@ -143,15 +152,20 @@ def split_training_and_reproduction_args(
     """
     Strictly split an arguments dictionary into:
     1. ultralytics_train_args: strictly containing ONLY valid Ultralytics YOLO arguments.
+       (Excludes project-specific reproduction keys and model-construction parameters like 'nc').
     2. repro_config: containing project-specific reproduction runtime settings.
 
-    Guarantees that custom project keys NEVER leak into Ultralytics DetectionTrainer / DetectionValidator.
+    Guarantees that custom project keys and model-construction-only arguments NEVER leak
+    into Ultralytics DetectionTrainer / DetectionValidator.
     """
     ultralytics_train_args: Dict[str, Any] = {}
     repro_config: Dict[str, Any] = {}
     for k, v in args_dict.items():
         if k in REPRODUCTION_CUSTOM_KEYS:
             repro_config[k] = v
+        elif k in MODEL_CONSTRUCTION_ONLY_KEYS:
+            # Model construction parameter (e.g. 'nc'); stripped from training cfg overrides
+            continue
         else:
             ultralytics_train_args[k] = v
     return ultralytics_train_args, repro_config

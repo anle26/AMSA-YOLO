@@ -22,6 +22,7 @@ Remapping Rule:
 """
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
@@ -106,6 +107,74 @@ def remap_yolov8s_key(key: str, target_has_prefix: bool = True) -> Optional[str]
     return f"model.{new_idx}.{suffix}" if target_has_prefix else f"{new_idx}.{suffix}"
 
 
+def detect_checkpoint_nc(ckpt_or_path: Union[str, Path, Dict[str, Any], nn.Module]) -> Optional[int]:
+    """
+    Detect the number of classes (nc) from a YOLO checkpoint file, dict, or model instance.
+
+    Inspects:
+    1. ckpt['model'].yaml['nc'] or ckpt['model'].nc
+    2. Direct model instance attributes (.yaml['nc'] or .nc)
+    3. Classification head tensor shapes in state_dict (e.g. model.22.cv3.0.2.weight or model.25.cv3.0.2.weight)
+
+    Returns:
+        Optional[int]: Detected class count, or None if undetermined.
+    """
+    if isinstance(ckpt_or_path, (str, Path)):
+        p = Path(ckpt_or_path).resolve()
+        if not p.is_file():
+            return None
+        ckpt = torch.load(p, map_location="cpu", weights_only=False)
+    else:
+        ckpt = ckpt_or_path
+
+    # Case 1: Checkpoint dictionary with 'model'
+    if isinstance(ckpt, dict) and "model" in ckpt:
+        m = ckpt["model"]
+        if hasattr(m, "yaml") and isinstance(m.yaml, dict) and "nc" in m.yaml:
+            try:
+                return int(m.yaml["nc"])
+            except (ValueError, TypeError):
+                pass
+        if hasattr(m, "nc") and m.nc is not None:
+            try:
+                return int(m.nc)
+            except (ValueError, TypeError):
+                pass
+
+    # Case 2: Direct model instance
+    if hasattr(ckpt, "yaml") and isinstance(ckpt.yaml, dict) and "nc" in ckpt.yaml:
+        try:
+            return int(ckpt.yaml["nc"])
+        except (ValueError, TypeError):
+            pass
+    if hasattr(ckpt, "nc") and ckpt.nc is not None:
+        try:
+            return int(ckpt.nc)
+        except (ValueError, TypeError):
+            pass
+
+    # Case 3: Inspect classification weights in state_dict
+    sd: Optional[Dict[str, Any]] = None
+    if isinstance(ckpt, dict):
+        if "model" in ckpt:
+            inner = ckpt["model"]
+            sd = inner.state_dict() if hasattr(inner, "state_dict") else (inner if isinstance(inner, dict) else None)
+        if sd is None:
+            sd = ckpt
+    elif hasattr(ckpt, "state_dict"):
+        sd = ckpt.state_dict()
+
+    if sd is not None:
+        # Detect head cv3 class prediction weights (layer 22 for stock YOLO, layer 25 for AMSA)
+        for prefix in ("model.22.cv3.", "22.cv3.", "model.25.cv3.", "25.cv3."):
+            for scale_idx in (0, 1, 2):
+                key = f"{prefix}{scale_idx}.2.weight"
+                if key in sd and hasattr(sd[key], "shape") and len(sd[key].shape) >= 1:
+                    return int(sd[key].shape[0])
+
+    return None
+
+
 def transfer_yolov8s_weights(
     target_model: Union[nn.Module, Any],
     source_state_dict: Union[Dict[str, torch.Tensor], nn.Module, Any],
@@ -115,7 +184,16 @@ def transfer_yolov8s_weights(
     Explicitly transfer weights from a stock YOLOv8s model or state_dict to AMSA-YOLOv8s.
 
     Validates key existence, exact tensor shape, and dtype compatibility before loading.
-    AMSA lateral layers (10, 11, 12) are guaranteed untouched.
+    AMSA lateral layers (10, 11, 12) are guaranteed untouched and left fresh.
+
+    Transfer Regimes:
+    - Regime A (Stock COCO -> VisDrone baseline):
+      COCO nc=80 -> VisDrone nc=10. Exactly 349/355 keys transfer because the 6 class-dependent
+      cv3.{scale}.2.{weight,bias} prediction tensors have a legitimate shape mismatch ([80] vs [10]).
+    - Regime B (Trained VisDrone baseline -> AMSA VisDrone):
+      VisDrone nc=10 -> AMSA VisDrone nc=10. When the AMSA target is configured with nc=10
+      prior to remapping, all 355 stock keys (162 backbone, 108 neck, 85 Detect head) match
+      shapes and transfer 100% (355/355), with 0 shape mismatches and 84 fresh AMSA tensors.
 
     Args:
         target_model: Target AMSA-YOLO model instance (nn.Module or YOLO wrapper).
